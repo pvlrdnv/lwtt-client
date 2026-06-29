@@ -17,7 +17,7 @@ User steps:
 1. Download the archive from the link above.
 2. Extract it to `C:\Trusttunnel`.
 3. Run `lwtt_tray_start.bat`.
-4. Get the server settings and `.pem` certificate file from **LikeWeb Bot**.
+4. Get the server settings and `.pem` certificate file in the **Telegram bot**.
 5. In the application, choose **Add server**.
 6. Paste the server settings message.
 7. Select the certificate file if the bot provided a `.pem` file.
