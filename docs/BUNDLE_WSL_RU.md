@@ -41,7 +41,7 @@ chmod +x build_bundle_wsl.sh tools/build_bundle_wsl.sh
 ./tools/build_bundle_wsl.sh x86_64
 ```
 
-Скрипт сам скачает последний TrustTunnelClient со страницы релизов GitHub, выберет asset `windows-x86_64`, добавит файлы LW TrustTunnel Client и создаст архив в папке `dist`.
+Скрипт сам скачает последний TrustTunnelClient со страницы релизов GitHub, выберет asset `windows-x86_64`, добавит файлы LW TrustTunnel Client и создаст архив в папке `dist`. В корне ZIP будет только `lwtt_tray_start.bat`, а все технические файлы будут во вложенной папке `lwtt_app/`.
 
 ## 4. Результат сборки
 
@@ -50,8 +50,8 @@ chmod +x build_bundle_wsl.sh tools/build_bundle_wsl.sh
 ```text
 LWTT_Client_Bundle_windows_x86_64.zip
 LWTT_Client_Bundle_windows_x86_64.zip.sha256
-LWTT_Client_Bundle_v4.15_trusttunnel_v..._windows_x86_64.zip
-LWTT_Client_Bundle_v4.15_trusttunnel_v..._windows_x86_64.zip.sha256
+LWTT_Client_Bundle_v4.16_trusttunnel_v..._windows_x86_64.zip
+LWTT_Client_Bundle_v4.16_trusttunnel_v..._windows_x86_64.zip.sha256
 ```
 
 Главная стабильная ссылка для README:

@@ -1,0 +1,6 @@
+LW TrustTunnel Client version: 4.16
+TrustTunnelClient release: v1.0.49
+TrustTunnelClient asset: trusttunnel_client-v1.0.49-windows-x86_64.zip
+Target: windows_x86_64
+Built at: 2026-06-29 19:05:58 UTC
+Builder: tools/build_bundle_wsl.sh

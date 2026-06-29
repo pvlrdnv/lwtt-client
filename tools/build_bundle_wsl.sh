@@ -3,11 +3,9 @@ set -euo pipefail
 
 # LW TrustTunnel Client bundle builder for VS Code WSL / Ubuntu.
 # Default target: windows_x86_64.
-# Usage:
-#   ./tools/build_bundle_wsl.sh
-#   ./tools/build_bundle_wsl.sh x86_64
-#   ./tools/build_bundle_wsl.sh i686
-#   ./tools/build_bundle_wsl.sh aarch64
+# Bundle structure:
+#   lwtt_tray_start.bat   - only user-facing launcher in the ZIP root
+#   lwtt_app/             - all technical files, TrustTunnel, profiles and logs
 
 ARCH="${1:-x86_64}"
 case "$ARCH" in
@@ -48,6 +46,16 @@ if [[ ! -d "$APP_DIR" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$APP_DIR/lwtt_tray_start.bat" ]]; then
+  echo "Missing user launcher: app/lwtt_tray_start.bat" >&2
+  exit 1
+fi
+
+if [[ ! -d "$APP_DIR/lwtt_app" ]]; then
+  echo "Missing runtime folder: app/lwtt_app" >&2
+  exit 1
+fi
+
 LWTT_VERSION="$(tr -d '\r\n ' < "$REPO_ROOT/VERSION" 2>/dev/null || true)"
 if [[ -z "$LWTT_VERSION" ]]; then
   LWTT_VERSION="dev"
@@ -60,7 +68,7 @@ RELEASE_JSON="$WORK_DIR/release.json"
 echo "Downloading latest TrustTunnelClient release metadata..."
 curl -fsSL "https://api.github.com/repos/TrustTunnel/TrustTunnelClient/releases/latest" -o "$RELEASE_JSON"
 
-eval "$(python3 - "$RELEASE_JSON" "$ARCH" <<'PY'
+eval "$(python3 - "$RELEASE_JSON" "$ARCH" <<'PY_EVAL'
 import json
 import shlex
 import sys
@@ -86,7 +94,7 @@ if match is None:
 print(f"TT_TAG={shlex.quote(tag)}")
 print(f"ASSET_NAME={shlex.quote(match['name'])}")
 print(f"ASSET_URL={shlex.quote(match['browser_download_url'])}")
-PY
+PY_EVAL
 )"
 
 echo "TrustTunnelClient release: $TT_TAG"
@@ -104,20 +112,22 @@ if [[ -z "$CLIENT_EXE" ]]; then
 fi
 TRUST_DIR="$(dirname "$CLIENT_EXE")"
 
-BUNDLE_ROOT="LWTT_Client_Bundle"
-BUNDLE_DIR="$WORK_DIR/out/$BUNDLE_ROOT"
-mkdir -p "$BUNDLE_DIR"
+BUNDLE_DIR="$WORK_DIR/out"
+RUNTIME_DIR="$BUNDLE_DIR/lwtt_app"
+mkdir -p "$RUNTIME_DIR"
 
-# Copy TrustTunnel files and LWTT application files into one flat runnable folder.
-cp -a "$TRUST_DIR/." "$BUNDLE_DIR/"
+# Copy LWTT files first: root receives only launcher, runtime receives technical files.
 cp -a "$APP_DIR/." "$BUNDLE_DIR/"
 
-# Add simple end-user quick start guide into the archive root.
+# Copy TrustTunnel files into hidden technical runtime folder, not into ZIP root.
+cp -a "$TRUST_DIR/." "$RUNTIME_DIR/"
+
+# Add simple end-user quick start guide into runtime folder to keep ZIP root clean.
 if [[ -f "$REPO_ROOT/docs/QUICK_START_BUNDLE_RU.txt" ]]; then
-  cp "$REPO_ROOT/docs/QUICK_START_BUNDLE_RU.txt" "$BUNDLE_DIR/README_QUICK_START_RU.txt"
+  cp "$REPO_ROOT/docs/QUICK_START_BUNDLE_RU.txt" "$RUNTIME_DIR/README_QUICK_START_RU.txt"
 fi
 
-cat > "$BUNDLE_DIR/BUILD_INFO.txt" <<INFO
+cat > "$RUNTIME_DIR/BUILD_INFO.txt" <<INFO
 LW TrustTunnel Client version: $LWTT_VERSION
 TrustTunnelClient release: $TT_TAG
 TrustTunnelClient asset: $ASSET_NAME
@@ -127,10 +137,10 @@ Builder: tools/build_bundle_wsl.sh
 INFO
 
 # Safety cleanup: never include local user data in a public bundle.
-rm -rf "$BUNDLE_DIR/profiles" \
-       "$BUNDLE_DIR/log" \
-       "$BUNDLE_DIR/.bundle_work" \
-       "$BUNDLE_DIR/profiles_backup" 2>/dev/null || true
+rm -rf "$RUNTIME_DIR/profiles" \
+       "$RUNTIME_DIR/log" \
+       "$RUNTIME_DIR/.bundle_work" \
+       "$RUNTIME_DIR/profiles_backup" 2>/dev/null || true
 find "$BUNDLE_DIR" -type f \( \
   -iname '*.pem' -o \
   -iname '*diagnostic*.txt' -o \
@@ -139,10 +149,19 @@ find "$BUNDLE_DIR" -type f \( \
   -iname 'trusttunnel_client.likeweb.toml' \
 \) -delete
 
-if [[ ! -f "$BUNDLE_DIR/trusttunnel_client.exe" || ! -f "$BUNDLE_DIR/wintun.dll" || ! -f "$BUNDLE_DIR/lwtt_tray_start.bat" ]]; then
+if [[ ! -f "$BUNDLE_DIR/lwtt_tray_start.bat" || ! -f "$RUNTIME_DIR/trusttunnel_client.exe" || ! -f "$RUNTIME_DIR/wintun.dll" || ! -f "$RUNTIME_DIR/lwtt_tray.ps1" ]]; then
   echo "Bundle validation failed: required files are missing." >&2
   exit 1
 fi
+
+# Keep ZIP root clean: only the launcher should be visible there; all technical files are in lwtt_app/.
+for item in "$BUNDLE_DIR"/*; do
+  name="$(basename "$item")"
+  if [[ "$name" != "lwtt_tray_start.bat" && "$name" != "lwtt_app" ]]; then
+    echo "Unexpected item in ZIP root: $name" >&2
+    exit 1
+  fi
+done
 
 SAFE_TT_TAG="${TT_TAG//\//_}"
 VERSIONED_NAME="LWTT_Client_Bundle_v${LWTT_VERSION}_trusttunnel_${SAFE_TT_TAG}_windows_${ARCH}.zip"
@@ -153,7 +172,6 @@ LATEST_ZIP="$DIST_DIR/$LATEST_NAME"
 rm -f "$VERSIONED_ZIP" "$LATEST_ZIP" "$VERSIONED_ZIP.sha256" "$LATEST_ZIP.sha256"
 (
   cd "$BUNDLE_DIR"
-  # Put runnable files directly into the ZIP root. Do not wrap them in LWTT_Client_Bundle/.
   zip -qr "$VERSIONED_ZIP" .
 )
 cp "$VERSIONED_ZIP" "$LATEST_ZIP"
@@ -174,11 +192,15 @@ Created:
   dist/$VERSIONED_NAME.sha256
   dist/$LATEST_NAME.sha256
 
+ZIP root structure:
+  lwtt_tray_start.bat
+  lwtt_app/
+
 Default public link for README:
   dist/$LATEST_NAME
 
 Next steps:
-  git add tools/build_bundle_wsl.sh build_bundle_wsl.sh docs/BUNDLE_WSL_RU.md README.md dist/$LATEST_NAME dist/$LATEST_NAME.sha256
+  git add app tools/build_bundle_wsl.sh build_bundle_wsl.sh docs dist/$LATEST_NAME dist/$LATEST_NAME.sha256
   git commit -m "Build LWTT bundle v$LWTT_VERSION for windows_$ARCH"
   git push origin main
 DONE
