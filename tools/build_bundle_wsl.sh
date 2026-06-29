@@ -4,8 +4,9 @@ set -euo pipefail
 # LW TrustTunnel Client bundle builder for VS Code WSL / Ubuntu.
 # Default target: windows_x86_64.
 # Bundle structure:
-#   lwtt_tray_start.bat   - only user-facing launcher in the ZIP root
-#   lwtt_app/             - all technical files, TrustTunnel, profiles and logs
+#   lwtt_tray_start.bat                    - user-facing launcher in the ZIP root
+#   ИНСТРУКЦИЯ БЫСТРОГО СТАРТА.txt         - user-facing quick start guide in the ZIP root
+#   lwtt_app/                              - technical files, TrustTunnel, profiles and logs
 
 ARCH="${1:-x86_64}"
 case "$ARCH" in
@@ -25,6 +26,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_DIR="$REPO_ROOT/app"
 DIST_DIR="$REPO_ROOT/dist"
 WORK_DIR="$REPO_ROOT/.bundle_work"
+QUICK_START_SOURCE="$REPO_ROOT/docs/QUICK_START_BUNDLE_RU.txt"
+QUICK_START_NAME="ИНСТРУКЦИЯ БЫСТРОГО СТАРТА.txt"
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -53,6 +56,11 @@ fi
 
 if [[ ! -d "$APP_DIR/lwtt_app" ]]; then
   echo "Missing runtime folder: app/lwtt_app" >&2
+  exit 1
+fi
+
+if [[ ! -f "$QUICK_START_SOURCE" ]]; then
+  echo "Missing quick start guide source: docs/QUICK_START_BUNDLE_RU.txt" >&2
   exit 1
 fi
 
@@ -116,16 +124,17 @@ BUNDLE_DIR="$WORK_DIR/out"
 RUNTIME_DIR="$BUNDLE_DIR/lwtt_app"
 mkdir -p "$RUNTIME_DIR"
 
-# Copy LWTT files first: root receives only launcher, runtime receives technical files.
+# Copy LWTT files first: root receives only user-facing files; runtime receives technical files.
 cp -a "$APP_DIR/." "$BUNDLE_DIR/"
 
-# Copy TrustTunnel files into hidden technical runtime folder, not into ZIP root.
+# Copy TrustTunnel files into technical runtime folder, not into ZIP root.
 cp -a "$TRUST_DIR/." "$RUNTIME_DIR/"
 
-# Add simple end-user quick start guide into runtime folder to keep ZIP root clean.
-if [[ -f "$REPO_ROOT/docs/QUICK_START_BUNDLE_RU.txt" ]]; then
-  cp "$REPO_ROOT/docs/QUICK_START_BUNDLE_RU.txt" "$RUNTIME_DIR/README_QUICK_START_RU.txt"
-fi
+# The quick start guide must be visible next to lwtt_tray_start.bat in the ZIP root.
+# Remove obsolete copies from the technical folder and put the final guide in the root.
+rm -f "$RUNTIME_DIR/README_QUICK_START_RU.txt" \
+      "$RUNTIME_DIR/$QUICK_START_NAME" 2>/dev/null || true
+cp "$QUICK_START_SOURCE" "$BUNDLE_DIR/$QUICK_START_NAME"
 
 cat > "$RUNTIME_DIR/BUILD_INFO.txt" <<INFO
 LW TrustTunnel Client version: $LWTT_VERSION
@@ -149,15 +158,15 @@ find "$BUNDLE_DIR" -type f \( \
   -iname 'trusttunnel_client.likeweb.toml' \
 \) -delete
 
-if [[ ! -f "$BUNDLE_DIR/lwtt_tray_start.bat" || ! -f "$RUNTIME_DIR/trusttunnel_client.exe" || ! -f "$RUNTIME_DIR/wintun.dll" || ! -f "$RUNTIME_DIR/lwtt_tray.ps1" ]]; then
+if [[ ! -f "$BUNDLE_DIR/lwtt_tray_start.bat" || ! -f "$BUNDLE_DIR/$QUICK_START_NAME" || ! -f "$RUNTIME_DIR/trusttunnel_client.exe" || ! -f "$RUNTIME_DIR/wintun.dll" || ! -f "$RUNTIME_DIR/lwtt_tray.ps1" ]]; then
   echo "Bundle validation failed: required files are missing." >&2
   exit 1
 fi
 
-# Keep ZIP root clean: only the launcher should be visible there; all technical files are in lwtt_app/.
+# Keep ZIP root clean: user-facing files stay in root; all technical files are in lwtt_app/.
 for item in "$BUNDLE_DIR"/*; do
   name="$(basename "$item")"
-  if [[ "$name" != "lwtt_tray_start.bat" && "$name" != "lwtt_app" ]]; then
+  if [[ "$name" != "lwtt_tray_start.bat" && "$name" != "$QUICK_START_NAME" && "$name" != "lwtt_app" ]]; then
     echo "Unexpected item in ZIP root: $name" >&2
     exit 1
   fi
@@ -194,6 +203,7 @@ Created:
 
 ZIP root structure:
   lwtt_tray_start.bat
+  $QUICK_START_NAME
   lwtt_app/
 
 Default public link for README:
