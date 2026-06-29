@@ -36,12 +36,6 @@ https://github.com/TrustTunnel/TrustTunnelClient/releases
 C:\Trusttunnel
 ```
 
-Можно использовать и другой путь, например:
-
-```text
-C:\Portable\trusttunnel-manager
-```
-
 Важно: все основные файлы должны лежать прямо в выбранной папке, а не во вложенной подпапке.
 
 ## 3. Распакуйте TrustTunnel
