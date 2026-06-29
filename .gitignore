@@ -1,0 +1,28 @@
+# Runtime/user data
+profiles/
+log/
+*.log
+*.pid
+*.tmp
+
+# Sensitive TrustTunnel/user files
+lwtt_client.toml
+trusttunnel_client.likeweb.toml
+*.pem
+*_diagnostic_*.txt
+LW_TrustTunnel_Client_diagnostic_*.txt
+Likeweb_VPN_diagnostic_*.txt
+
+# TrustTunnel binaries are downloaded separately by users
+trusttunnel_client.exe
+wintun.dll
+setup_wizard.exe
+
+# Windows/editor files
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+
+# Local bundle build cache
+.bundle_work/
