@@ -1,9 +1,10 @@
 # LW TrustTunnel Client
 
-**LW TrustTunnel Client** is a Windows tray and server-profile manager for the TrustTunnel client.
+**Язык:** Русский | [English](README_EN.md)
 
-The application does not include any ready-made server profiles, certificates, usernames, passwords, or active TrustTunnel configuration. Each user must add their own server settings in the manager.
+**LW TrustTunnel Client** — это Windows-приложение в системном трее для управления TrustTunnel Client и сохраненными профилями серверов.
 
+Приложение не содержит готовых профилей серверов, сертификатов, логинов, паролей или активного файла конфигурации. Каждый пользователь добавляет свои настройки сервера самостоятельно.
 
 ## Быстрый старт для Windows
 
@@ -16,9 +17,11 @@ The application does not include any ready-made server profiles, certificates, u
 1. Скачать архив по ссылке выше.
 2. Распаковать его в папку `C:\Trusttunnel`.
 3. Запустить `lwtt_tray_start.bat`.
-4. Получить настройки сервера и файл сертификата `.pem` в LikeWeb Bot.
-5. В приложении выбрать **Добавить сервер**, вставить сообщение с настройками и выбрать файл сертификата.
-6. Нажать **Сохранить и подключить**.
+4. Получить настройки сервера и файл сертификата `.pem` в **LikeWeb Bot**.
+5. В приложении выбрать **Добавить сервер**.
+6. Вставить сообщение с настройками сервера.
+7. Выбрать файл сертификата, если бот прислал `.pem`.
+8. Нажать **Сохранить и подключить**.
 
 Если файла по ссылке еще нет, разработчик должен собрать его в VS Code WSL:
 
@@ -26,47 +29,92 @@ The application does not include any ready-made server profiles, certificates, u
 ./build_bundle_wsl.sh
 ```
 
-По умолчанию собирается `windows_x86_64`. Подробнее: [docs/BUNDLE_WSL_RU.md](docs/BUNDLE_WSL_RU.md).
+По умолчанию собирается вариант для большинства компьютеров:
 
-## What this repository contains
+```text
+windows_x86_64
+```
 
-- `app/` — LW TrustTunnel Client scripts and tray icons.
-- `docs/INSTALL_RU.md` — installation guide in Russian.
-- `docs/USAGE_RU.md` — usage guide in Russian.
-- `docs/SERVER_PROFILES_RU.md` — server profile format and import notes.
-- `docs/TROUBLESHOOTING_RU.md` — troubleshooting guide.
-- `docs/SECURITY_RU.md` — privacy and security notes.
-- `dist/LWTT_Client_Manager_v4_15_public.zip` — ready-to-copy public package without user profiles.
-- `tools/build_bundle_wsl.sh` — WSL builder for the ready-to-run Windows x86_64 bundle.
+Подробнее: [docs/BUNDLE_WSL_RU.md](docs/BUNDLE_WSL_RU.md).
 
-## Important
+## Что находится в репозитории
 
-Install the original TrustTunnel Windows client first. LW TrustTunnel Client is a management wrapper and expects `trusttunnel_client.exe` and `wintun.dll` to be present in the same folder as the files from `app/`.
+- `app/` — скрипты LW TrustTunnel Client и иконки трея.
+- `docs/INSTALL_RU.md` — подробная инструкция установки на русском языке.
+- `docs/USAGE_RU.md` — инструкция по использованию.
+- `docs/SERVER_PROFILES_RU.md` — описание профилей серверов и импорта настроек.
+- `docs/TROUBLESHOOTING_RU.md` — диагностика и решение проблем.
+- `docs/SECURITY_RU.md` — заметки по безопасности и приватности.
+- `docs/BUNDLE_WSL_RU.md` — сборка готового bundle-архива в VS Code WSL.
+- `dist/LWTT_Client_Manager_v4_15_public.zip` — публичный архив только с оболочкой LWTT, без профилей пользователей.
+- `tools/build_bundle_wsl.sh` — WSL-сборщик готового архива для Windows x86_64.
 
-Recommended folder:
+## Важное замечание
+
+LW TrustTunnel Client — это оболочка управления. Для работы рядом с файлами приложения должны находиться:
+
+```text
+trusttunnel_client.exe
+wintun.dll
+```
+
+В готовом bundle-архиве эти файлы уже добавляются автоматически сборщиком. Если вы используете архив только с оболочкой LWTT, сначала установите официальный TrustTunnel Client для Windows.
+
+Рекомендуемая папка установки:
 
 ```text
 C:\Trusttunnel
 ```
 
-After installing TrustTunnel and copying LWTT files, start:
+Запуск приложения:
 
 ```text
 lwtt_tray_start.bat
 ```
 
-## Not included
+## Что специально не включается в репозиторий
 
-For safety, the repository and public ZIP intentionally do **not** include:
+В целях безопасности в репозиторий и публичные ZIP-архивы не должны попадать:
 
 - `profiles/`
 - `profiles/certificates/`
 - `profiles/backups/`
 - `lwtt_client.toml`
 - `*.pem`
-- diagnostic logs
-- server credentials
+- журналы и диагностические файлы
+- настройки серверов
+- логины и пароли
 
-## License
+Готовый bundle-архив может содержать `trusttunnel_client.exe` и `wintun.dll`, потому что он предназначен для быстрого запуска обычными пользователями. Но локальные профили, сертификаты и конфигурации пользователей туда не включаются.
 
-No open-source license has been selected yet. Unless a license is added by the repository owner, all rights are reserved.
+## Для разработчика
+
+Сборка готового архива для пользователей Windows из VS Code WSL:
+
+```bash
+sudo apt update
+sudo apt install -y curl unzip zip python3 ca-certificates
+chmod +x build_bundle_wsl.sh tools/build_bundle_wsl.sh
+./build_bundle_wsl.sh
+```
+
+После сборки основной файл для публикации:
+
+```text
+dist/LWTT_Client_Bundle_windows_x86_64.zip
+```
+
+Перед коммитом обязательно проверьте, что в Git не попали локальные данные:
+
+```bash
+find . \
+  -path './.git' -prune -o \
+  \( -path './profiles*' -o -path './log*' -o -name '*.pem' -o -name 'lwtt_client.toml' -o -name '*diagnostic*.txt' \) \
+  -print
+```
+
+Если команда что-то вывела, эти файлы нельзя отправлять в GitHub.
+
+## Лицензия
+
+См. [LICENSE](LICENSE). На данный момент открытая лицензия для проекта не выбрана. Все права защищены владельцем репозитория.
