@@ -23,3 +23,6 @@ Thumbs.db
 Desktop.ini
 .vscode/
 .idea/
+
+# Local bundle build cache
+.bundle_work/
