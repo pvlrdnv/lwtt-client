@@ -152,8 +152,9 @@ LATEST_ZIP="$DIST_DIR/$LATEST_NAME"
 
 rm -f "$VERSIONED_ZIP" "$LATEST_ZIP" "$VERSIONED_ZIP.sha256" "$LATEST_ZIP.sha256"
 (
-  cd "$WORK_DIR/out"
-  zip -qr "$VERSIONED_ZIP" "$BUNDLE_ROOT"
+  cd "$BUNDLE_DIR"
+  # Put runnable files directly into the ZIP root. Do not wrap them in LWTT_Client_Bundle/.
+  zip -qr "$VERSIONED_ZIP" .
 )
 cp "$VERSIONED_ZIP" "$LATEST_ZIP"
 
