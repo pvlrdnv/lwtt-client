@@ -16,6 +16,11 @@ if (-not (Test-Path -LiteralPath $commonPath)) {
 }
 
 . $commonPath
+. (Join-Path $PSScriptRoot 'lwtt_bypass_ui.ps1')
+$script:TrayJob = $null
+$script:ExitReplyId = ''
+$script:ExitAfterDisconnect = $false
+$script:ExitWhenIdle = $false
 
 
 function New-StatusDotBitmap {
@@ -105,7 +110,12 @@ $BusyIconPath = Join-Path $script:LikewebBaseDir "icons8-waiting-96.ico"
 # Drag-and-drop of certificate files is disabled in the manager; certificates
 # are selected by the explicit "Выбрать файл" button.
 
-Initialize-LikewebExistingProfile
+if ($null -eq (Get-LikewebPendingJob) -and -not (Test-LikewebRecoveryRequired)) {
+    $initialLock = $null
+    try { $initialLock = Enter-LikewebOperationLock; Remove-LikewebStaleJobs; Initialize-LikewebExistingProfile }
+    catch { Write-LikewebRuntimeError 'Initialize profiles' $_ }
+    finally { if ($null -ne $initialLock) { $initialLock.Dispose() } }
+}
 
 $createdNew = $false
 $mutex = New-Object System.Threading.Mutex(
@@ -136,52 +146,6 @@ function Get-TruncatedText {
     return $Text.Substring(0, $MaximumLength - 1) + "…"
 }
 
-
-function Get-LikewebServerManagerProcessIdsForTray {
-    $ids = New-Object System.Collections.Generic.HashSet[int]
-
-    try {
-        if (Test-Path -LiteralPath $script:LikewebManagerPidPath -PathType Leaf) {
-            $pidText = ([System.IO.File]::ReadAllText($script:LikewebManagerPidPath)).Trim()
-            $managerPid = 0
-            if ([int]::TryParse($pidText, [ref]$managerPid)) {
-                [void]$ids.Add($managerPid)
-            }
-        }
-    }
-    catch {
-    }
-
-    try {
-        $escapedScript = [Regex]::Escape($script:LikewebBaseDir + "\lwtt_manager.ps1")
-        $managerProcesses = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue
-        foreach ($process in $managerProcesses) {
-            $commandLine = [string]$process.CommandLine
-            if (-not [string]::IsNullOrWhiteSpace($commandLine) -and $commandLine -match $escapedScript) {
-                [void]$ids.Add([int]$process.ProcessId)
-            }
-        }
-    }
-    catch {
-    }
-
-    return @($ids | Where-Object { $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue) })
-}
-
-function Wait-LikewebServerManagerClosedForTray {
-    param([int]$TimeoutMilliseconds = 3000)
-
-    $deadline = (Get-Date).AddMilliseconds($TimeoutMilliseconds)
-    while ((Get-Date) -lt $deadline) {
-        if (@(Get-LikewebServerManagerProcessIdsForTray).Count -eq 0) {
-            return $true
-        }
-        Start-Sleep -Milliseconds 100
-        try { [System.Windows.Forms.Application]::DoEvents() } catch {}
-    }
-
-    return (@(Get-LikewebServerManagerProcessIdsForTray).Count -eq 0)
-}
 
 function Show-TrayMessage {
     param(
@@ -246,10 +210,41 @@ function Set-TrayState {
         }
     }
 
-    [System.Windows.Forms.Application]::DoEvents()
 }
 
 function Update-TrayStatus {
+    # A connection continues safely if its manager closes. The tray adopts its result.
+    if ($null -eq $script:TrayJob) {
+        $descriptorPath = Join-Path $script:LikewebLogDir 'pending_job.json'
+        if ([IO.File]::Exists($descriptorPath)) {
+            try {
+                $orphan = [IO.File]::ReadAllText($descriptorPath) | ConvertFrom-Json
+                if ($orphan.OwnerPid -and $orphan.OwnerPid -ne $PID -and $null -eq (Get-Process -Id ([int]$orphan.OwnerPid) -ErrorAction SilentlyContinue) -and [IO.File]::Exists($orphan.ResultPath)) { $script:TrayJob = $orphan }
+            } catch { Write-LikewebRuntimeError 'Read detached operation' $_ }
+        }
+    }
+    if ($script:ExitWhenIdle -and $null -eq (Get-LikewebPendingJob)) { $script:ExitWhenIdle = $false; Close-LikewebApplication }
+    if ($script:ExitReplyId) {
+        $reply = Join-Path $script:LikewebLogDir ('manager_reply_' + $script:ExitReplyId + '.json')
+        if ([IO.File]::Exists($reply)) {
+            $answer = [IO.File]::ReadAllText($reply) | ConvertFrom-Json
+            [IO.File]::Delete($reply); $script:ExitReplyId = ''
+            if ($answer.Closed) { Close-LikewebApplication }
+        } elseif ($null -eq (Get-LikewebManagerProcess)) { $script:ExitReplyId = ''; Close-LikewebApplication }
+    }
+    if ($null -ne $script:TrayJob) {
+        try {
+            $result = Receive-LikewebJob $script:TrayJob
+            if ($null -ne $result) {
+                $script:TrayJob = $null
+                $script:CertificateHelpProfileId = if ($result.CanAddCertificate) { [string]$result.ProfileId } else { '' }
+                $certificateHelpItem.Visible = -not [string]::IsNullOrWhiteSpace($script:CertificateHelpProfileId)
+                if (-not $result.Success) { $script:ExitAfterDisconnect = $false; Show-TrayMessage $result.ErrorMessage ([Windows.Forms.ToolTipIcon]::Error) }
+                elseif ($script:ExitAfterDisconnect) { $script:ExitAfterDisconnect = $false; $script:ExitWhenIdle = $true }
+                else { Show-TrayMessage 'Операция завершена.' ([Windows.Forms.ToolTipIcon]::Info) }
+            }
+        } catch { Write-LikewebRuntimeError 'Read tray job' $_ }
+    }
     if ($script:OperationInProgress) {
         return
     }
@@ -265,11 +260,21 @@ function Update-TrayStatus {
                 Set-TrayState "Disconnecting"
                 return
             }
+            "Restoring" {
+                Set-TrayState "Connecting"
+                $statusItem.Text = 'Статус: восстановление подключения…'
+                return
+            }
         }
     }
 
-    if (Get-LikewebProcess) {
+    if (Get-LikewebTunnelReady) {
         Set-TrayState "Connected"
+    }
+    elseif (Get-LikewebProcess) {
+        Set-TrayState 'Connecting'
+        $statusItem.Text = 'Статус: туннель пока не подтвердил подключение'
+        $disconnectItem.Enabled = $true
     }
     else {
         Set-TrayState "Disconnected"
@@ -277,185 +282,43 @@ function Update-TrayStatus {
 }
 
 function Start-CurrentVpn {
-    if (Get-LikewebProcess) {
+    try {
+        $active = Get-LikewebActiveProfileInfo
+        if ($null -eq $active) { throw 'Сначала выберите сервер.' }
+        $script:TrayJob = Start-LikewebAction -Action Connect -ProfilePath $active.Path
         Update-TrayStatus
-        return
-    }
-
-    $activeProfile = Get-LikewebActiveProfileInfo
-    if ($null -eq $activeProfile) {
-        Show-TrayMessage "Сначала выберите сервер." ([System.Windows.Forms.ToolTipIcon]::Warning)
-        return
-    }
-
-    $script:OperationInProgress = $true
-    Set-LikewebOperationState "Connecting" $activeProfile.Id $activeProfile.DisplayName
-    Set-TrayState "Connecting"
-    Start-Sleep -Milliseconds 500
-
-    $started = Start-LikewebVpnAndWait
-    Clear-LikewebOperationState
-    $script:OperationInProgress = $false
-
-    if ($started) {
-        Set-TrayState "Connected"
-    }
-    else {
-        Set-TrayState "Disconnected"
-        Show-TrayMessage (
-            "TrustTunnel не запустился. Запустите lwtt_start.bat вручную, чтобы увидеть техническую ошибку."
-        ) ([System.Windows.Forms.ToolTipIcon]::Error)
-    }
+    } catch { Show-TrayMessage $_.Exception.Message ([Windows.Forms.ToolTipIcon]::Error) }
 }
 
 function Stop-CurrentVpn {
-    if (-not (Get-LikewebProcess)) {
+    try {
+        $script:TrayJob = Start-LikewebAction -Action Disconnect
         Update-TrayStatus
-        return
-    }
-
-    $activeProfile = Get-LikewebActiveProfileInfo
-    $script:OperationInProgress = $true
-    Set-LikewebOperationState "Disconnecting" $(if ($null -ne $activeProfile) { $activeProfile.Id } else { "" }) $(if ($null -ne $activeProfile) { $activeProfile.DisplayName } else { "" })
-    Set-TrayState "Disconnecting"
-    Start-Sleep -Milliseconds 500
-    $stopped = Stop-LikewebVpnAndWait
-    Clear-LikewebOperationState
-    $script:OperationInProgress = $false
-
-    if ($stopped) {
-        Set-TrayState "Disconnected"
-    }
-    else {
-        Update-TrayStatus
-        Show-TrayMessage "Не удалось остановить TrustTunnel." ([System.Windows.Forms.ToolTipIcon]::Error)
-    }
+    } catch { Show-TrayMessage $_.Exception.Message ([Windows.Forms.ToolTipIcon]::Error) }
 }
 
 function Switch-ToServerAndConnect {
     param([string]$ProfileId)
-
-    $path = Join-Path $script:LikewebProfilesDir ($ProfileId + ".toml")
-
-    if (-not (Test-Path -LiteralPath $path)) {
-        Show-TrayMessage "Профиль сервера не найден." ([System.Windows.Forms.ToolTipIcon]::Error)
-        return
-    }
-
     try {
-        $profile = Get-LikewebProfileInfo $path
-        $activeId = Get-LikewebActiveProfileId
-
-        if ($activeId -eq $ProfileId -and (Get-LikewebProcess)) {
-            Update-TrayStatus
-            return
-        }
-
-        $script:OperationInProgress = $true
-        Set-LikewebOperationState "Disconnecting" $activeId ""
-        Set-TrayState "Disconnecting"
-        [void](Stop-LikewebVpnAndWait)
-
-        Set-LikewebActiveProfile $path
+        $path = Join-Path $script:LikewebProfilesDir ((ConvertTo-LikewebSafeId $ProfileId) + '.toml')
+        $script:TrayJob = Start-LikewebAction -Action Connect -ProfilePath $path
         Rebuild-ServersMenu
-        Set-LikewebOperationState "Connecting" $profile.Id $profile.DisplayName
-        Set-TrayState "Connecting"
-        Start-Sleep -Milliseconds 500
-
-        $started = Start-LikewebVpnAndWait
-        Clear-LikewebOperationState
-        $script:OperationInProgress = $false
-
-        if ($started) {
-            Set-TrayState "Connected"
-        }
-        else {
-            Set-TrayState "Disconnected"
-            Show-TrayMessage (
-                "Не удалось подключиться к серверу «" + $profile.DisplayName + "»."
-            ) ([System.Windows.Forms.ToolTipIcon]::Error)
-        }
-    }
-    catch {
-        Clear-LikewebOperationState
-        $script:OperationInProgress = $false
         Update-TrayStatus
-        Show-TrayMessage $_.Exception.Message ([System.Windows.Forms.ToolTipIcon]::Error)
-    }
+    } catch { Show-TrayMessage $_.Exception.Message ([Windows.Forms.ToolTipIcon]::Error) }
 }
 
 function Start-ServerManager {
-    param(
-        [ValidateSet("Servers", "Add")]
-        [string]$Mode = "Servers",
-        [string]$ProfileId = ""
-    )
-
-    if (-not (Test-Path -LiteralPath $ManagerScript)) {
-        Show-TrayMessage "Не найден lwtt_manager.ps1." ([System.Windows.Forms.ToolTipIcon]::Error)
-        return
-    }
-
-    if ($script:ManagerLaunchInProgress) {
-        return
-    }
-
-    $script:ManagerLaunchInProgress = $true
-
-    # Keep only one manager window. Before opening a requested view, close any
-    # previous manager instance so repeated tray clicks cannot create duplicates.
+    param([ValidateSet('Servers','Add','Certificate')][string]$Mode = 'Servers', [string]$ProfileId = '')
     try {
-        Close-LikewebServerManagerWindows
-        [void](Wait-LikewebServerManagerClosedForTray 3000)
-        Start-Sleep -Milliseconds 150
-    }
-    catch {
-    }
-
-    $powershellPath = Join-Path $PSHOME "powershell.exe"
-    $argumentList = New-Object System.Collections.Generic.List[string]
-    $argumentList.Add("-NoProfile")
-    $argumentList.Add("-STA")
-    $argumentList.Add("-ExecutionPolicy")
-    $argumentList.Add("Bypass")
-    $argumentList.Add("-WindowStyle")
-    $argumentList.Add("Hidden")
-    $argumentList.Add("-File")
-    $argumentList.Add($ManagerScript)
-    $argumentList.Add("-Mode")
-    $argumentList.Add($Mode)
-
-    if (-not [string]::IsNullOrWhiteSpace($ProfileId)) {
-        $argumentList.Add("-ProfileId")
-        $argumentList.Add($ProfileId)
-    }
-
-    try {
-        Start-Process `
-            -FilePath $powershellPath `
-            -ArgumentList $argumentList.ToArray() `
-            -WorkingDirectory $script:LikewebBaseDir `
-            -WindowStyle Hidden
-    }
-    catch {
-        try {
-            $shell = New-Object -ComObject Shell.Application
-            $shellArgs = ($argumentList | ForEach-Object {
-                if ($_ -match '\\|\s') { '"' + ([string]$_).Replace('"', '') + '"' } else { [string]$_ }
-            }) -join " "
-            $shell.ShellExecute($powershellPath, $shellArgs, $script:LikewebBaseDir, "open", 0)
-        }
-        catch {
-            Show-TrayMessage "Не удалось открыть управление серверами." ([System.Windows.Forms.ToolTipIcon]::Error)
-        }
-    }
-    finally {
-        $script:ManagerLaunchInProgress = $false
-$script:TrayMenuVisible = $false
-    }
+        if ($null -ne (Get-LikewebManagerProcess)) { $null = Send-LikewebManagerRequest $Mode $ProfileId; return }
+        $arguments = '-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Mode {1}' -f $ManagerScript, $Mode
+        if ($ProfileId) { $arguments += ' -ProfileId "' + (ConvertTo-LikewebSafeId $ProfileId) + '"' }
+        Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments -WorkingDirectory $script:LikewebBaseDir -WindowStyle Hidden
+    } catch { Show-TrayMessage ('Не удалось открыть управление серверами. ' + $_.Exception.Message) ([Windows.Forms.ToolTipIcon]::Error) }
 }
 
 function Rebuild-ServersMenu {
+    foreach ($oldItem in @($serversMenu.DropDownItems)) { $oldItem.Dispose() }
     $serversMenu.DropDownItems.Clear()
     $activeId = Get-LikewebActiveProfileId
     $profiles = @(Get-LikewebProfiles)
@@ -473,6 +336,7 @@ function Rebuild-ServersMenu {
             $item.ToolTipText = $profile.Address
             $item.Tag = $profile.Id
             $item.Checked = ($profile.Id -eq $activeId)
+            $item.Enabled = -not $profile.Invalid -and $null -eq (Get-LikewebPendingJob)
 
             $item.Add_Click({
                 param($sender, $eventArgs)
@@ -535,34 +399,24 @@ function Export-LikewebDiagnosticLog {
 }
 
 function Close-LikewebApplication {
-    $exitItem.Enabled = $false
-    $connectItem.Enabled = $false
-    $disconnectItem.Enabled = $false
-
-    if (Get-LikewebProcess) {
-        $activeProfile = Get-LikewebActiveProfileInfo
-        $script:OperationInProgress = $true
-        Set-LikewebOperationState "Disconnecting" $(if ($null -ne $activeProfile) { $activeProfile.Id } else { "" }) $(if ($null -ne $activeProfile) { $activeProfile.DisplayName } else { "" })
-        Set-TrayState "Disconnecting"
-        $stopped = Stop-LikewebVpnAndWait
-        Clear-LikewebOperationState
-        $script:OperationInProgress = $false
-
-        if (-not $stopped) {
-            Update-TrayStatus
-            $exitItem.Enabled = $true
-            Show-TrayMessage (
-                "Не удалось отключить TrustTunnel. Приложение останется открытым."
-            ) ([System.Windows.Forms.ToolTipIcon]::Error)
-            return
-        }
+    if ($null -ne (Get-LikewebPendingJob)) {
+        Show-TrayMessage 'Дождитесь завершения операции. При проверке сервера закройте её окно для безопасной отмены.' ([Windows.Forms.ToolTipIcon]::Warning)
+        return
     }
-
-    Close-LikewebServerManagerWindows
+    if ($null -ne (Get-LikewebManagerProcess)) {
+        if (-not $script:ExitReplyId) { $script:ExitReplyId = Send-LikewebManagerRequest 'Close' }
+        return
+    }
+    if (Get-LikewebProcess) {
+        try {
+            $script:TrayJob = Start-LikewebAction -Action Disconnect
+            $script:ExitAfterDisconnect = $true
+        } catch { Show-TrayMessage $_.Exception.Message ([Windows.Forms.ToolTipIcon]::Error) }
+        return
+    }
     $timer.Stop()
     $notifyIcon.Visible = $false
-    $notifyIcon.Dispose()
-    [System.Windows.Forms.Application]::Exit()
+    [Windows.Forms.Application]::Exit()
 }
 
 if (Test-Path -LiteralPath $ConnectedIconPath) {
@@ -625,6 +479,26 @@ $disconnectItem.Image = $script:MenuIconDisconnect
 $serversMenu = New-Object System.Windows.Forms.ToolStripMenuItem
 $serversMenu.Text = "Серверы"
 
+$bypassItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$bypassItem.Text = 'Обход VPN…'
+$bypassItem.Add_Click({
+    try { Show-LikewebBypassDialog }
+    catch { Show-TrayMessage $_.Exception.Message ([Windows.Forms.ToolTipIcon]::Error) }
+})
+$certificateHelpItem = New-Object Windows.Forms.ToolStripMenuItem
+$certificateHelpItem.Text = 'Добавить сертификат для сервера…'
+$certificateHelpItem.Visible = $false
+$certificateHelpItem.Add_Click({
+    if ($script:CertificateHelpProfileId) { Start-ServerManager 'Certificate' $script:CertificateHelpProfileId }
+})
+
+$recoverItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$recoverItem.Text = 'Восстановить подключение'
+$recoverItem.Add_Click({
+    try { $script:TrayJob = Start-LikewebAction -Action Recover }
+    catch { Show-TrayMessage $_.Exception.Message ([Windows.Forms.ToolTipIcon]::Error) }
+})
+
 $checkIpItem = New-Object System.Windows.Forms.ToolStripMenuItem
 $checkIpItem.Text = "Проверить внешний IP"
 
@@ -645,6 +519,9 @@ $exitItem.Image = $script:MenuIconExit
 [void]$menu.Items.Add($connectItem)
 [void]$menu.Items.Add($disconnectItem)
 [void]$menu.Items.Add($serversMenu)
+[void]$menu.Items.Add($bypassItem)
+[void]$menu.Items.Add($recoverItem)
+[void]$menu.Items.Add($certificateHelpItem)
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$menu.Items.Add($checkIpItem)
 [void]$menu.Items.Add($exportLogItem)
@@ -656,6 +533,7 @@ $notifyIcon.ContextMenuStrip = $menu
 
 $menu.Add_Opening({
     $script:TrayMenuVisible = $true
+    $recoverItem.Visible = Test-LikewebRecoveryRequired
     Rebuild-ServersMenu
     Update-TrayStatus
 })
@@ -700,6 +578,7 @@ $timer.Start()
 
 Rebuild-ServersMenu
 Update-TrayStatus
+if (Test-LikewebRecoveryRequired) { Show-TrayMessage 'Обнаружена незавершённая операция. Выберите «Восстановить подключение» в меню.' ([Windows.Forms.ToolTipIcon]::Warning) }
 
 try {
     [System.Windows.Forms.Application]::Run()

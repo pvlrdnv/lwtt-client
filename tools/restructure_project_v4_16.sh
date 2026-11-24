@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CURRENT_VERSION="$(tr -d '\r\n ' < "$ROOT/VERSION")"
+if [[ "$CURRENT_VERSION" != "4.15" ]]; then
+  echo "Legacy migration applies only to version 4.15. Use docs/MIGRATION_RU.md for current versions." >&2
+  exit 1
+fi
 APP_DIR="$ROOT/app"
 RUNTIME_DIR="$APP_DIR/lwtt_app"
 if [[ ! -d "$APP_DIR" ]]; then echo "app/ folder not found" >&2; exit 1; fi

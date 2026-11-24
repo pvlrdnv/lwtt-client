@@ -1,10 +1,10 @@
 ﻿param(
-    [ValidateSet("Servers", "Add")]
+    [ValidateSet("Servers", "Add", "Certificate")]
     [string]$Mode = "Servers",
     [string]$ProfileId = ""
 )
 
-# LW TrustTunnel Client Server Manager v4.13
+# LW TrustTunnel Client Server Manager
 # Windows PowerShell 5.1 / Windows 10 and Windows 11
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -30,7 +30,22 @@ if (-not (Test-Path -LiteralPath $commonPath)) {
 # This minimizes UAC prompts: the user confirms elevation once at application start.
 # Drag-and-drop is disabled; PEM files are added through the "Выбрать файл" button.
 
-Initialize-LikewebExistingProfile
+$hashProvider = [Security.Cryptography.SHA256]::Create()
+try { $managerKey = [BitConverter]::ToString($hashProvider.ComputeHash([Text.Encoding]::UTF8.GetBytes($PSScriptRoot.ToLowerInvariant()))).Replace('-','') }
+finally { $hashProvider.Dispose() }
+$managerCreated = $false
+$script:ManagerMutex = [Threading.Mutex]::new($true, ('Local\LWTT_Manager_' + $managerKey), [ref]$managerCreated)
+if (-not $managerCreated) {
+    $null = Send-LikewebManagerRequest $Mode $ProfileId
+    $script:ManagerMutex.Dispose()
+    exit
+}
+if ($null -eq (Get-LikewebPendingJob) -and -not (Test-LikewebRecoveryRequired)) {
+    $initialLock = $null
+    try { $initialLock = Enter-LikewebOperationLock; Remove-LikewebStaleJobs; Initialize-LikewebExistingProfile }
+    catch { Write-LikewebRuntimeError 'Initialize profiles' $_ }
+    finally { if ($null -ne $initialLock) { $initialLock.Dispose() } }
+}
 
 try {
     [System.IO.File]::WriteAllText(
@@ -65,6 +80,9 @@ function Write-LikewebManagerLog {
             if ($null -ne $ErrorRecord.ScriptStackTrace) {
                 $line += "`r`n" + $ErrorRecord.ScriptStackTrace
             }
+        }
+        if ([IO.File]::Exists($script:ManagerLogPath) -and (Get-Item -LiteralPath $script:ManagerLogPath).Length -gt 1MB) {
+            Move-Item -LiteralPath $script:ManagerLogPath -Destination ($script:ManagerLogPath + '.old') -Force
         }
         Add-Content -LiteralPath $script:ManagerLogPath -Value $line -Encoding UTF8
     }
@@ -322,7 +340,7 @@ $script:IconConnected = New-LikewebUiIcon "Success" 18 $script:ColorSuccess
 $script:IconDisconnected = New-LikewebUiIcon "Error" 18 $script:ColorError
 $script:IconPlay = New-LikewebUiIcon "Play" 16 $script:ColorAccent
 $script:IconStop = New-LikewebUiIcon "Stop" 16 $script:ColorSecondaryText
-$script:IconAddWhite = New-LikewebUiIcon "Add" 16 [System.Drawing.Color]::White
+$script:IconAddWhite = New-LikewebUiIcon "Add" 16 ([System.Drawing.Color]::White)
 $script:IconAdd = New-LikewebUiIcon "Add" 16 $script:ColorAccent
 $script:IconMore = New-LikewebUiIcon "More" 18 $script:ColorSecondaryText
 $script:IconEdit = New-LikewebUiIcon "Edit" 16 $script:ColorSecondaryText
@@ -335,7 +353,7 @@ $script:IconSearch = New-LikewebUiIcon "Search" 16 $script:ColorAccent
 $script:IconCertificate = New-LikewebUiIcon "Certificate" 28 $script:ColorAccent
 $script:IconFile = New-LikewebUiIcon "File" 28 $script:ColorAccent
 $script:IconSave = New-LikewebUiIcon "Save" 16 $script:ColorSecondaryText
-$script:IconSaveWhite = New-LikewebUiIcon "Save" 16 [System.Drawing.Color]::White
+$script:IconSaveWhite = New-LikewebUiIcon "Save" 16 ([System.Drawing.Color]::White)
 $script:IconCancel = New-LikewebUiIcon "Cancel" 16 $script:ColorSecondaryText
 $script:IconEye = New-LikewebUiIcon "Eye" 16 $script:ColorSecondaryText
 $script:IconEyeOff = New-LikewebUiIcon "EyeOff" 16 $script:ColorSecondaryText
@@ -614,7 +632,7 @@ function Set-StatusPair {
 $script:EditingProfileId = ""
 $script:SettingsRecognized = $false
 $script:RecognitionAttempted = $false
-$script:CertificateExpected = $false
+$script:CertificateExpanded = $false
 $script:SelectedCertificateInfo = $null
 $script:SelectedCertificatePath = ""
 $script:EditorDirty = $false
@@ -630,6 +648,8 @@ $script:TestResultPath = ""
 $script:TestConfigPath = ""
 $script:TestLogPath = ""
 $script:LastTestLog = ""
+$script:ConnectionJob = $null
+$script:CloseAfterTest = $false
 
 # UI references are initialized later.
 $script:CurrentView = "Servers"
@@ -800,6 +820,7 @@ function Set-ServersMessage {
         [string]$Text = ""
     )
 
+    if ($null -ne $serversCertificateButton) { $serversCertificateButton.Visible = $false; $serversMessagePanel.Height = 48 }
     Set-MessageBar $serversMessagePanel $serversMessageIcon $serversMessageLabel $State $Text $serversMessageCopyButton
 }
 
@@ -849,11 +870,8 @@ function Test-CertificateMatchesHostname {
         }
     }
 
-    # If Windows cannot expose certificate metadata, do not reject a valid PEM
-    # only because the local .NET build is too old to inspect it.
-    if ($names.Count -eq 0) {
-        return $true
-    }
+    # Callers skip this check for CA files and for unavailable metadata.
+    if ($names.Count -eq 0) { return $false }
 
     foreach ($name in $names) {
         if ([string]::IsNullOrWhiteSpace([string]$name)) {
@@ -919,7 +937,25 @@ function Set-TestStatus {
     Set-StatusPair $testStatusIcon $testStatusLabel $State $Text
 }
 
+function Set-CertificateExpanded {
+    param([bool]$Expanded)
+    $script:CertificateExpanded = $Expanded
+    $certificateDropPanel.Visible = $Expanded
+    $certificateToggleButton.Image = if ($Expanded) { $script:IconChevronUp } else { $script:IconChevronDown }
+    $certificateToggleButton.AccessibleDescription = if ($Expanded) { 'Раздел развёрнут. Нажмите для сворачивания.' } else { 'Раздел свёрнут. Нажмите для добавления, замены или удаления PEM.' }
+    if (-not $script:LoadingEditor) { Update-EditorResponsiveLayout }
+}
+
+function Open-CertificateSection {
+    Set-CertificateExpanded $true
+    $editorScrollPanel.ScrollControlIntoView($certificateSurface)
+    if ($null -eq $script:SelectedCertificateInfo) { [void]$chooseCertificateButton.Focus() }
+    else { [void]$replaceCertificateButton.Focus() }
+}
+
 function Update-CertificateCard {
+    $certificateToggleButton.Text = if ($null -ne $script:SelectedCertificateInfo) { 'Сертификат сервера · PEM добавлен' } else { 'Сертификат сервера · необязательно' }
+    Set-CertificateExpanded $script:CertificateExpanded
     if ($null -eq $script:SelectedCertificateInfo) {
         $certificateEmptyPanel.Visible = $true
         $certificateFilePanel.Visible = $false
@@ -943,11 +979,12 @@ function Update-CertificateCard {
         return
     }
 
-    $kindText = if ($script:SelectedCertificateInfo.IsSelfSigned) {
+    $kindText = if ($script:SelectedCertificateInfo.IsCertificateAuthority) { 'Сертификат удостоверяющего центра' }
+    elseif ($script:SelectedCertificateInfo.IsSelfSigned) {
         "Самоподписанный сертификат"
     }
     else {
-        "Сертификат удостоверяющего центра"
+        "Сертификат сервера"
     }
 
     $validityText = "Действует до " + $script:SelectedCertificateInfo.NotAfter.ToString("dd.MM.yyyy")
@@ -956,55 +993,48 @@ function Update-CertificateCard {
 
 function Clear-CertificateSelection {
     $script:SelectedCertificateInfo = $null
-    $script:SelectedCertificatePath = ""
+    $script:SelectedCertificatePath = ''
     $embedCertificateCheckBox.Checked = $false
     Update-CertificateCard
-
-    if ($script:CertificateExpected) {
-        Set-CertificateStatus "Требуется сертификат. Добавьте файл .pem." "Warning"
-    }
-    else {
-        Set-CertificateStatus "Сертификат не требуется. При необходимости его можно добавить." "Neutral"
-    }
-
+    Set-CertificateStatus 'Используется доверие Windows. Удаление PEM применится после сохранения.' 'Neutral'
     Mark-EditorDirty
     Update-EditorValidation
 }
 
 function Load-CertificateIntoEditor {
     param([string]$Path)
+    $previousInfo = $script:SelectedCertificateInfo
+    $previousPath = $script:SelectedCertificatePath
 
     try {
         Set-CertificateStatus "Проверяем сертификат…" "Loading"
-        [System.Windows.Forms.Application]::DoEvents()
 
         $info = Get-LikewebCertificateInformation $Path
         $script:SelectedCertificateInfo = $info
         $script:SelectedCertificatePath = $Path
 
-        # Self-signed certificates must be embedded. If an old Windows build
-        # cannot read the metadata, embedding is the safest behavior because
-        # the administrator explicitly supplied this PEM.
-        $embedCertificateCheckBox.Checked = (
-            $info.IsSelfSigned -or
-            $info.MetadataRead -eq $false
-        )
+        # Every explicitly selected PEM is used for verification, including CA-issued server certificates.
+        $embedCertificateCheckBox.Checked = $true
+        Set-CertificateExpanded $true
         Update-CertificateCard
 
         if ($info.MetadataRead -eq $false) {
             Set-CertificateStatus "PEM загружен и будет встроен. Windows не смог проверить его метаданные." "Warning"
         }
+        elseif ($info.NotBefore -gt (Get-Date)) {
+            Set-CertificateStatus 'Срок действия сертификата ещё не начался.' 'Error'
+        }
         elseif ($info.NotAfter -lt (Get-Date)) {
             Set-CertificateStatus "Истек срок действия сертификата. Выберите актуальный PEM." "Error"
         }
-        elseif (-not (Test-CertificateMatchesHostname $(if ($info.PSObject.Properties.Name -contains "DnsNames") { $info.DnsNames } else { $info.DnsName }) $hostnameTextBox.Text)) {
+        elseif (-not $info.IsCertificateAuthority -and -not (Test-CertificateMatchesHostname $(if ($info.PSObject.Properties.Name -contains "DnsNames") { $info.DnsNames } else { $info.DnsName }) $hostnameTextBox.Text)) {
             Set-CertificateStatus "Сертификат не соответствует домену. Проверьте PEM или домен сервера." "Error"
         }
         elseif ($info.IsSelfSigned) {
             Set-CertificateStatus "Сертификат проверен и будет встроен в конфигурацию." "Success"
         }
         else {
-            Set-CertificateStatus "Сертификат проверен. Для публичного сертификата будет использовано хранилище Windows." "Success"
+            Set-CertificateStatus "Сертификат проверен и будет использован при подключении." "Success"
         }
 
         Mark-EditorDirty
@@ -1012,8 +1042,9 @@ function Load-CertificateIntoEditor {
     }
     catch {
         Write-LikewebManagerLog ("Ошибка чтения PEM: " + $Path) $_
-        $script:SelectedCertificateInfo = $null
-        $script:SelectedCertificatePath = ""
+        $script:SelectedCertificateInfo = $previousInfo
+        $script:SelectedCertificatePath = $previousPath
+        $embedCertificateCheckBox.Checked = $null -ne $previousInfo
         Update-CertificateCard
         Set-CertificateStatus "Не удалось прочитать PEM. Проверьте файл или выберите другой сертификат." "Error"
         Set-EditorMessage "Error" ("Не удалось прочитать сертификат. Подробности записаны в " + $script:ManagerLogPath)
@@ -1051,11 +1082,8 @@ function Update-RecognitionSummary {
     $summaryCertificateValue.Text = if ($null -ne $script:SelectedCertificateInfo) {
         "Добавлен"
     }
-    elseif ($script:CertificateExpected) {
-        "Требуется"
-    }
     else {
-        "Не требуется"
+        "Доверие Windows"
     }
 }
 
@@ -1093,6 +1121,9 @@ function Get-EditorValidationResult {
     Set-FieldError "Username" $usernameTextBox ""
     Set-FieldError "Password" $passwordTextBox ""
 
+    try { $hostname = Normalize-LikewebHostname $hostname }
+    catch { $errors.Add($_.Exception.Message); Set-FieldError 'Hostname' $hostnameTextBox $_.Exception.Message }
+
     if ([string]::IsNullOrWhiteSpace($displayName)) {
         $message = "Укажите название, которое увидит пользователь."
         $errors.Add($message)
@@ -1103,6 +1134,11 @@ function Get-EditorValidationResult {
         $message = "Укажите служебное имя сервера."
         $errors.Add($message)
         Set-FieldError "ServerName" $serverNameTextBox $message
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($serverName)) {
+        try { $null = ConvertTo-LikewebSafeId $serverName }
+        catch { $errors.Add($_.Exception.Message); Set-FieldError 'ServerName' $serverNameTextBox $_.Exception.Message }
     }
 
     if ([string]::IsNullOrWhiteSpace($address)) {
@@ -1136,24 +1172,17 @@ function Get-EditorValidationResult {
         Set-FieldError "Password" $passwordTextBox $message
     }
 
-    if ($script:CertificateExpected -and $null -eq $script:SelectedCertificateInfo) {
-        $errors.Add("Добавьте сертификат, указанный администратором.")
-    }
-
     if (
         $null -ne $script:SelectedCertificateInfo -and
         $script:SelectedCertificateInfo.MetadataRead -ne $false
     ) {
-        if ($script:SelectedCertificateInfo.NotAfter -lt (Get-Date)) {
+        if ($script:SelectedCertificateInfo.NotBefore -gt (Get-Date)) { $errors.Add('Срок действия сертификата ещё не начался.') }
+        elseif ($script:SelectedCertificateInfo.NotAfter -lt (Get-Date)) {
             $errors.Add("Выбранный сертификат просрочен.")
         }
-        elseif (-not (Test-CertificateMatchesHostname $(if ($script:SelectedCertificateInfo.PSObject.Properties.Name -contains "DnsNames") { $script:SelectedCertificateInfo.DnsNames } else { $script:SelectedCertificateInfo.DnsName }) $hostname)) {
+        elseif (-not $script:SelectedCertificateInfo.IsCertificateAuthority -and -not (Test-CertificateMatchesHostname $(if ($script:SelectedCertificateInfo.PSObject.Properties.Name -contains "DnsNames") { $script:SelectedCertificateInfo.DnsNames } else { $script:SelectedCertificateInfo.DnsName }) $hostname)) {
             $errors.Add("Сертификат не соответствует домену сервера.")
         }
-    }
-
-    if ($embedCertificateCheckBox.Checked -and $null -eq $script:SelectedCertificateInfo) {
-        $errors.Add("Для встраивания сертификата сначала выберите PEM-файл.")
     }
 
     return [pscustomobject]@{
@@ -1163,12 +1192,13 @@ function Get-EditorValidationResult {
 }
 
 function Update-EditorValidation {
+    if ($script:LoadingEditor) { return }
     if ($null -eq $saveButton) {
         return
     }
 
     $result = Get-EditorValidationResult
-    $enabled = $result.IsValid -and -not $script:TestWorkerProcess
+    $enabled = $result.IsValid -and -not $script:TestWorkerProcess -and -not (Get-LikewebPendingJob)
 
     $saveButton.Enabled = $enabled
     $saveConnectButton.Enabled = $enabled
@@ -1191,8 +1221,9 @@ function Update-EditorValidation {
     $script:UiToolTip.SetToolTip($saveConnectButton, $reason)
     $script:UiToolTip.SetToolTip($testButton, $reason)
 
+    $summaryWasVisible = $summarySurface.Visible
     Update-RecognitionSummary
-    Update-EditorContentLayout
+    if ($summaryWasVisible -ne $summarySurface.Visible) { Request-EditorLayout }
 }
 
 function Set-AdvancedVisibility {
@@ -1216,7 +1247,7 @@ function Reset-Editor {
         $script:EditingProfileId = ""
         $script:SettingsRecognized = $false
         $script:RecognitionAttempted = $false
-        $script:CertificateExpected = $false
+        $script:CertificateExpanded = $false
         $script:SelectedCertificateInfo = $null
         $script:SelectedCertificatePath = ""
         $script:LastTestLog = ""
@@ -1246,7 +1277,7 @@ function Reset-Editor {
         $testDetailsSurface.Visible = $false
         $testDetailsTextBox.Clear()
         Set-RecognitionStatus "Вставьте сообщение с параметрами сервера." "Neutral"
-        Set-CertificateStatus "Выберите файл .pem вручную кнопкой выше." "Neutral"
+        Set-CertificateStatus "Используется доверие Windows. PEM можно добавить при необходимости." "Neutral"
         Update-CertificateCard
         Set-AdvancedVisibility $false
         Set-EditorMessage "Hidden"
@@ -1280,10 +1311,7 @@ function Fill-EditorFromParsedSettings {
         }
 
         $ipv6CheckBox.Checked = ConvertTo-LikewebBoolean $Settings.IPv6
-        $script:CertificateExpected = (
-            $Settings.CertificateMode -match
-            '(?i)(custom|included|self|pem|пользователь|самоподпис|включ|импорт)'
-        )
+        # Import text never makes a PEM file mandatory.
 
         $missing = New-Object System.Collections.Generic.List[string]
         if ([string]::IsNullOrWhiteSpace($Settings.DisplayName)) { $missing.Add("название сервера") }
@@ -1308,11 +1336,8 @@ function Fill-EditorFromParsedSettings {
             Set-AdvancedVisibility $true
         }
 
-        if ($script:CertificateExpected -and $null -eq $script:SelectedCertificateInfo) {
-            Set-CertificateStatus "Требуется сертификат из сообщения администратора." "Warning"
-        }
-        elseif (-not $script:CertificateExpected -and $null -eq $script:SelectedCertificateInfo) {
-            Set-CertificateStatus "Сертификат не требуется. При необходимости его можно добавить." "Neutral"
+        if ($null -eq $script:SelectedCertificateInfo) {
+            Set-CertificateStatus 'Используется доверие Windows. PEM можно добавить при необходимости.' 'Neutral'
         }
     }
     finally {
@@ -1334,7 +1359,6 @@ function Invoke-Recognition {
 
     try {
         Set-RecognitionStatus "Распознаем настройки…" "Loading"
-        [System.Windows.Forms.Application]::DoEvents()
         $settings = Parse-LikewebSettingsMessage $messageTextBox.Text
         Fill-EditorFromParsedSettings $settings
     }
@@ -1367,13 +1391,13 @@ function Get-EditorSettings {
         ServerName = $serverName
         ProfileId = ConvertTo-LikewebSafeId $serverName
         Address = Normalize-LikewebAddress $addressTextBox.Text
-        Hostname = $hostnameTextBox.Text.Trim()
+        Hostname = Normalize-LikewebHostname $hostnameTextBox.Text
         Username = $usernameTextBox.Text.Trim()
         Password = $passwordTextBox.Text
         Protocol = Normalize-LikewebProtocol $protocolComboBox.Text
         HasIPv6 = $ipv6CheckBox.Checked
         CertificatePem = $certificatePem
-        EmbedCertificate = $embedCertificateCheckBox.Checked
+        EmbedCertificate = ($null -ne $script:SelectedCertificateInfo)
     }
 }
 
@@ -1391,6 +1415,10 @@ function Get-EditorToml {
         -CertificatePem $settings.CertificatePem `
         -EmbedCertificate $settings.EmbedCertificate
 
+    if ($script:EditingProfileId) {
+        $originalPath = Resolve-LikewebProfilePathForManager $script:EditingProfileId
+        $toml = Update-LikewebProfileToml ([IO.File]::ReadAllText($originalPath)) $toml
+    }
     return [pscustomobject]@{
         Settings = $settings
         Toml = $toml
@@ -1481,6 +1509,7 @@ function Update-ServerRowState {
     $isConnected = ($Profile.Id -eq $ActiveId -and $IsRunning)
     $isActive = ($Profile.Id -eq $ActiveId)
     $isBusy = ($script:OperationProfileId -eq $Profile.Id)
+    $anyBusy = $null -ne (Get-LikewebPendingJob)
 
     $rowState.NameLabel.Text = $Profile.DisplayName
     $rowState.AddressLabel.Text = $Profile.Address
@@ -1514,7 +1543,7 @@ function Update-ServerRowState {
         $rowState.BusyLabel.Visible = $false
         $rowState.BusyProgress.Visible = $false
         $rowState.ActionButton.Visible = $true
-        $rowState.MoreButton.Enabled = $true
+        $rowState.MoreButton.Enabled = -not $anyBusy
 
         if ($isConnected) {
             $rowState.StatusIcon.Image = $script:IconConnected
@@ -1552,6 +1581,8 @@ function Update-ServerRowState {
         }
     }
 
+    $rowState.ActionButton.Enabled = -not $anyBusy -and -not $Profile.Invalid
+    if ($Profile.Invalid) { $rowState.StateLabel.Text = 'Ошибка профиля; откройте файл через меню' }
     $rowState.Row.BackColor = $rowState.Row.NormalBackColor
     $rowState.Row.Invalidate()
 }
@@ -1774,7 +1805,7 @@ function Refresh-ServerList {
     try {
         $profiles = @(Get-LikewebProfiles)
         $activeId = Get-LikewebActiveProfileId
-        $isRunning = $null -ne (Get-LikewebProcess)
+        $isRunning = Get-LikewebTunnelReady
 
         $signature = ($profiles | ForEach-Object {
             $_.Id + "|" + $_.DisplayName + "|" + $_.Address
@@ -1813,82 +1844,29 @@ function Refresh-ServerList {
 
 function Connect-ProfileById {
     param([string]$Id)
-
-    $path = Join-Path $script:LikewebProfilesDir ($Id + ".toml")
-    if (-not (Test-Path -LiteralPath $path)) {
-        Set-ServersMessage "Error" "Профиль сервера не найден. Обновите список или добавьте сервер заново."
-        return
-    }
-
     try {
-        Set-ServersMessage "Hidden"
-        $profile = Get-LikewebProfileInfo $path
-        $activeId = Get-LikewebActiveProfileId
+        $path = Resolve-LikewebProfilePathForManager $Id
+        $script:ConnectionJob = Start-LikewebAction -Action Connect -ProfilePath $path
         $script:OperationProfileId = $Id
-        $script:OperationKind = "Connect"
+        $script:OperationKind = 'Connect'
+        Set-ServersMessage 'Warning' 'Подключение к серверу…'
         Refresh-ServerList
-        [System.Windows.Forms.Application]::DoEvents()
-
-        if (Get-LikewebProcess) {
-            Set-LikewebOperationState "Disconnecting" $activeId ""
-            [void](Stop-LikewebVpnAndWait)
-        }
-
-        Set-LikewebActiveProfile $path
-        Set-LikewebOperationState "Connecting" $profile.Id $profile.DisplayName
-
-        if (-not (Start-LikewebVpnAndWait)) {
-            throw "TrustTunnel не запустился. Откройте lwtt_start.bat вручную, чтобы увидеть техническую ошибку."
-        }
-    }
-    catch {
-        Set-ServersMessage "Error" (
-            "Не удалось подключиться. Проверьте адрес, учетные данные и сертификат. " +
-            $_.Exception.Message
-        )
-    }
-    finally {
-        Clear-LikewebOperationState
-        $script:OperationProfileId = ""
-        $script:OperationKind = ""
-        Refresh-ServerList -Force
-    }
+    } catch { Set-ServersMessage 'Error' $_.Exception.Message }
 }
 
 function Disconnect-ProfileById {
     param([string]$Id)
-
-    $activeId = Get-LikewebActiveProfileId
-    if ($Id -ne $activeId -or -not (Get-LikewebProcess)) {
-        Refresh-ServerList
-        return
-    }
-
     try {
-        Set-ServersMessage "Hidden"
+        $script:ConnectionJob = Start-LikewebAction -Action Disconnect
         $script:OperationProfileId = $Id
-        $script:OperationKind = "Disconnect"
+        $script:OperationKind = 'Disconnect'
         Refresh-ServerList
-        [System.Windows.Forms.Application]::DoEvents()
-
-        Set-LikewebOperationState "Disconnecting" $Id ""
-        if (-not (Stop-LikewebVpnAndWait)) {
-            throw "Процесс TrustTunnel не завершился. Повторите отключение."
-        }
-    }
-    catch {
-        Set-ServersMessage "Error" ("Не удалось отключить TrustTunnel. " + $_.Exception.Message)
-    }
-    finally {
-        Clear-LikewebOperationState
-        $script:OperationProfileId = ""
-        $script:OperationKind = ""
-        Refresh-ServerList -Force
-    }
+    } catch { Set-ServersMessage 'Error' $_.Exception.Message }
 }
 
 function Delete-ProfileById {
     param([string]$Id)
+    $deleteLock = $null
 
     $path = Join-Path $script:LikewebProfilesDir ($Id + ".toml")
 
@@ -1897,7 +1875,8 @@ function Delete-ProfileById {
             throw "Профиль сервера не найден."
         }
 
-        $profile = Get-LikewebProfileInfo $path
+        try { $profile = Get-LikewebProfileInfo $path }
+        catch { $profile = [pscustomobject]@{ DisplayName = $Id + ' (ошибка файла)' } }
         $activeId = Get-LikewebActiveProfileId
 
         if ($Id -eq $activeId) {
@@ -1909,11 +1888,15 @@ function Delete-ProfileById {
             return
         }
 
-        Remove-Item -LiteralPath $path -Force
-        $certificatePath = Join-Path $script:LikewebCertificatesDir ($Id + ".pem")
-        if (Test-Path -LiteralPath $certificatePath) {
-            Remove-Item -LiteralPath $certificatePath -Force
+        $deleteLock = Enter-LikewebOperationLock
+        if ($Id -eq (Get-LikewebActiveProfileId)) {
+            Set-ServersMessage 'Warning' 'Сервер стал активным, пока было открыто подтверждение. Сначала выберите другой сервер.'
+            return
         }
+        $changes = [ordered]@{}
+        $changes[$path] = $null
+        $changes[(Join-Path $script:LikewebCertificatesDir ($Id + '.pem'))] = $null
+        Invoke-LikewebFileTransaction $changes
 
         $script:LastProfileSignature = ""
         Refresh-ServerList -Force
@@ -1922,6 +1905,7 @@ function Delete-ProfileById {
     catch {
         Set-ServersMessage "Error" ("Не удалось удалить сервер. " + $_.Exception.Message)
     }
+    finally { if ($null -ne $deleteLock) { $deleteLock.Dispose() } }
 }
 
 # -------------------- Page navigation and profile editing --------------------
@@ -1950,6 +1934,7 @@ function Show-ServersPage {
         }
     }
 
+    if ($script:TestWorkerProcess) { return }
     $editorPage.Visible = $false
     $serversPage.Visible = $true
     $serversPage.BringToFront()
@@ -1960,6 +1945,8 @@ function Show-ServersPage {
 }
 
 function Show-NewServerPage {
+    if ($script:TestWorkerProcess) { return }
+    if ($script:CurrentView -eq "Editor" -and -not (Confirm-DiscardChanges)) { return }
     Reset-Editor
     Update-EditorHeader
     $serversPage.Visible = $false
@@ -2046,7 +2033,6 @@ function Load-ProfileForEditing {
         $script:CurrentView = "Editor"
         $form.AcceptButton = $saveConnectButton
         Set-EditorLoadingOverlay $true
-        [System.Windows.Forms.Application]::DoEvents()
 
         Reset-Editor
         $profile = Get-LikewebProfileInfo $profilePath
@@ -2071,7 +2057,7 @@ function Load-ProfileForEditing {
             $certificateFile = Join-Path $script:LikewebCertificatesDir ([string]$profile.Id + ".pem")
             if (Test-Path -LiteralPath $certificateFile -PathType Leaf) {
                 Load-CertificateIntoEditor $certificateFile
-                $embedCertificateCheckBox.Checked = [bool]$profile.EmbedCertificate
+                $embedCertificateCheckBox.Checked = $true
             }
             elseif (-not [string]::IsNullOrWhiteSpace([string]$profile.CertificatePem)) {
                 $script:SelectedCertificateInfo = Get-LikewebCertificateInformationFromPem $profile.CertificatePem
@@ -2084,15 +2070,15 @@ function Load-ProfileForEditing {
                 $script:SelectedCertificateInfo = $null
                 $script:SelectedCertificatePath = ""
                 Update-CertificateCard
-                Set-CertificateStatus "Для этого профиля сертификат не сохранен." "Neutral"
+                Set-CertificateStatus 'Используется доверие Windows. PEM можно добавить при необходимости.' 'Neutral'
             }
 
             Set-RecognitionStatus "Параметры сохраненного сервера загружены." "Success"
 
-            # Editing is a focused technical form: hide the import and large
-            # certificate cards, show every editable field immediately.
+            # Keep the optional certificate section available while editing.
             $settingsSurface.Visible = $false
-            $certificateSurface.Visible = $false
+            $certificateSurface.Visible = $true
+            Set-CertificateExpanded $false
             $summarySurface.Visible = $false
             $advancedToggleButton.Visible = $false
             Set-AdvancedVisibility $true
@@ -2123,258 +2109,136 @@ function Load-ProfileForEditing {
 
 function Save-EditorProfile {
     param([bool]$ConnectAfterSave)
-
+    $lock = $null
     try {
-        Set-EditorMessage "Hidden"
+        Set-EditorMessage 'Hidden'
         $result = Get-EditorToml
         $settings = $result.Settings
         $newId = $settings.ProfileId
-        $newPath = Join-Path $script:LikewebProfilesDir ($newId + ".toml")
-        $certificatePath = Join-Path $script:LikewebCertificatesDir ($newId + ".pem")
+        $newPath = Join-Path $script:LikewebProfilesDir ($newId + '.toml')
+        $certificatePath = Join-Path $script:LikewebCertificatesDir ($newId + '.pem')
         $oldId = $script:EditingProfileId
-        $activeIdBefore = Get-LikewebActiveProfileId
-        $wasEditing = -not [string]::IsNullOrWhiteSpace($oldId)
-
-        if (
-            (Test-Path -LiteralPath $newPath) -and
-            ((-not $wasEditing) -or ($oldId -ne $newId))
-        ) {
-            $overwrite = [System.Windows.Forms.MessageBox]::Show(
-                "Сервер с таким служебным именем уже существует. Перезаписать его?",
-                "LW TrustTunnel Client",
-                [System.Windows.Forms.MessageBoxButtons]::YesNo,
-                [System.Windows.Forms.MessageBoxIcon]::Warning
-            )
-            if ($overwrite -ne [System.Windows.Forms.DialogResult]::Yes) {
-                return
-            }
+        if ([IO.File]::Exists($newPath) -and $oldId -ne $newId) {
+            $answer = [Windows.Forms.MessageBox]::Show('Сервер с таким служебным именем уже существует. Перезаписать его?', 'LW TrustTunnel Client', 'YesNo', 'Warning')
+            if ($answer -ne 'Yes') { return }
         }
-
-        [System.IO.File]::WriteAllText($newPath, $result.Toml, $script:LikewebUtf8NoBom)
-
-        if ($null -ne $script:SelectedCertificateInfo) {
-            [System.IO.File]::WriteAllText(
-                $certificatePath,
-                $script:SelectedCertificateInfo.Pem + "`r`n",
-                $script:LikewebUtf8NoBom
-            )
+        $lock = Enter-LikewebOperationLock
+        if (Test-LikewebRecoveryRequired) { throw 'Сначала восстановите незавершённую операцию в трее.' }
+        $activeId = Get-LikewebActiveProfileId
+        $isRunning = $null -ne (Get-LikewebProcess)
+        $changes = [ordered]@{}
+        $changes[$newPath] = $result.Toml
+        $changes[$certificatePath] = if ($null -ne $script:SelectedCertificateInfo) { $script:SelectedCertificateInfo.Pem + "`r`n" } else { $null }
+        if ($oldId -and $oldId -ne $newId) {
+            $changes[(Join-Path $script:LikewebProfilesDir ($oldId + '.toml'))] = $null
+            $changes[(Join-Path $script:LikewebCertificatesDir ($oldId + '.pem'))] = $null
         }
-        elseif (Test-Path -LiteralPath $certificatePath) {
-            Remove-Item -LiteralPath $certificatePath -Force
+        $affectsActive = ($oldId -and $activeId -eq $oldId) -or $activeId -eq $newId
+        if ($affectsActive) {
+            $changes[$script:LikewebActiveProfilePath] = $newId
+            # Do not replace the running session's configuration until reconnecting.
+            if (-not $isRunning) { $changes[$script:LikewebActiveConfigPath] = Add-LikewebBypassToToml $result.Toml }
         }
-
-        if ($wasEditing -and $oldId -ne $newId) {
-            $oldPath = Join-Path $script:LikewebProfilesDir ($oldId + ".toml")
-            $oldCertificatePath = Join-Path $script:LikewebCertificatesDir ($oldId + ".pem")
-            if (Test-Path -LiteralPath $oldPath) {
-                Remove-Item -LiteralPath $oldPath -Force
-            }
-            if (Test-Path -LiteralPath $oldCertificatePath) {
-                Remove-Item -LiteralPath $oldCertificatePath -Force
-            }
-        }
-
-        if ($ConnectAfterSave) {
-            if (Get-LikewebProcess) {
-                Set-LikewebOperationState "Disconnecting" $activeIdBefore ""
-                [void](Stop-LikewebVpnAndWait)
-            }
-            Set-LikewebActiveProfile $newPath
-            Set-LikewebOperationState "Connecting" $newId $settings.DisplayName
-            if (-not (Start-LikewebVpnAndWait)) {
-                throw "Сервер сохранен, но подключение не установлено. Проверьте адрес, учетные данные и сертификат."
-            }
-        }
-        elseif ($wasEditing -and $activeIdBefore -eq $oldId) {
-            Set-LikewebActiveProfile $newPath
-        }
-
-        Clear-LikewebOperationState
+        Invoke-LikewebFileTransaction $changes
+        $lock.Dispose(); $lock = $null
         $script:EditingProfileId = $newId
         $script:EditorDirty = $false
-        $script:LastProfileSignature = ""
+        $script:LastProfileSignature = ''
         Show-ServersPage -SkipDiscardCheck
-        $successMessage = if ($ConnectAfterSave) {
-            "Сервер сохранен и подключен: " + $settings.DisplayName
-        }
-        else {
-            "Сервер сохранен: " + $settings.DisplayName
-        }
-        Set-ServersMessage "Success" $successMessage
-    }
-    catch {
-        Clear-LikewebOperationState
-        Set-EditorMessage "Error" (
-            "Не удалось сохранить сервер. Проверьте выделенные поля и повторите. " +
-            $_.Exception.Message
-        )
+        Set-ServersMessage 'Success' ('Сервер сохранён: ' + $settings.DisplayName + $(if ($isRunning -and $affectsActive -and -not $ConnectAfterSave) { '. Изменения применятся после переподключения.' } else { '' }))
+        if ($ConnectAfterSave) { Connect-ProfileById $newId }
+    } catch {
+        Set-EditorMessage 'Error' ('Не удалось сохранить сервер. ' + $_.Exception.Message)
         Update-EditorValidation
-    }
+    } finally { if ($null -ne $lock) { $lock.Dispose() } }
 }
 
 # -------------------- Asynchronous test worker --------------------
 
 function Stop-TestWorker {
     if ($null -ne $script:TestWorkerProcess) {
-        try {
-            if (-not $script:TestWorkerProcess.HasExited) {
-                $script:TestWorkerProcess.Kill()
-            }
-        }
-        catch {}
-        $script:TestWorkerProcess.Dispose()
-        $script:TestWorkerProcess = $null
+        Write-LikewebAtomicText $script:TestWorkerProcess.CancelPath 'cancel'
+        Set-TestStatus 'Отмена проверки; восстанавливаем прежнее подключение…' 'Loading'
     }
 }
 
 function Complete-ServerTest {
     param([pscustomobject]$Result)
-
     $testPollTimer.Stop()
-    Stop-TestWorker
-    foreach ($temporaryPath in @(
-        $script:TestConfigPath,
-        $script:TestResultPath,
-        $script:TestLogPath
-    )) {
-        if (-not [string]::IsNullOrWhiteSpace($temporaryPath) -and (Test-Path -LiteralPath $temporaryPath)) {
-            try { Remove-Item -LiteralPath $temporaryPath -Force } catch {}
-        }
-    }
+    $script:TestWorkerProcess = $null
     $testProgress.Visible = $false
-    $testDetailsLink.Visible = $false
-
-    if ($null -ne $Result -and $Result.Success) {
-        Set-TestStatus "Подключение проверено." "Success"
-        $testDetailsSurface.Visible = $false
-        $script:LastTestLog = [string]$Result.LogTail
+    $script:LastTestLog = [string]$Result.LogTail
+    $testDetailsLink.Visible = -not [string]::IsNullOrWhiteSpace($script:LastTestLog)
+    if (-not $Result.Success -and $Result.CanAddCertificate) {
+        Set-EditorMessage 'Error' $Result.ErrorMessage
+        Set-CertificateStatus $Result.ErrorMessage 'Warning'
+        Open-CertificateSection
     }
-    else {
-        $message = "Не удалось подключиться. Проверьте адрес, учетные данные и сертификат."
-        if ($null -ne $Result -and -not [string]::IsNullOrWhiteSpace([string]$Result.ErrorMessage)) {
-            $message += " " + [string]$Result.ErrorMessage
-        }
-        Set-TestStatus $message "Error"
-        $script:LastTestLog = if ($null -ne $Result) { [string]$Result.LogTail } else { "" }
-        $testDetailsLink.Visible = -not [string]::IsNullOrWhiteSpace($script:LastTestLog)
+    if ($Result.Success) { Set-TestStatus 'Туннель подтвердил подключение.' 'Success' }
+    else { Set-TestStatus ('Проверка завершена. ' + $Result.ErrorMessage) 'Error' }
+    if (-not $Result.PreviousConnectionRestored) {
+        $script:CloseAfterTest = $false
+        Set-EditorMessage 'Warning' 'Прежнее подключение не восстановлено. Выберите «Восстановить подключение» в трее.'
     }
-
-    if ($null -ne $Result -and -not $Result.PreviousConnectionRestored) {
-        Set-EditorMessage "Warning" "Проверка завершена, но предыдущее соединение TrustTunnel не восстановлено. Подключите нужный сервер снова."
-    }
-
     Update-EditorValidation
-    Update-EditorResponsiveLayout
+    Request-EditorLayout
+    if ($script:CloseAfterTest) { $script:CloseAfterTest = $false; $form.Close() }
 }
 
 function Start-EditorServerTest {
     try {
+        if ($script:TestWorkerProcess) { return }
         $result = Get-EditorToml
-        $workerPath = Join-Path $PSScriptRoot "lwtt_test_worker.ps1"
-        if (-not (Test-Path -LiteralPath $workerPath)) {
-            throw "Не найден lwtt_test_worker.ps1."
-        }
-
-        Stop-TestWorker
-        $testRoot = Join-Path $script:LikewebProfilesDir "test"
-        if (-not (Test-Path -LiteralPath $testRoot)) {
-            [void](New-Item -ItemType Directory -Path $testRoot -Force)
-        }
-
-        $token = [Guid]::NewGuid().ToString("N")
-        $script:TestConfigPath = Join-Path $testRoot ($token + ".toml")
-        $script:TestResultPath = Join-Path $testRoot ($token + ".json")
-        $script:TestLogPath = Join-Path $testRoot ($token + ".log")
-        [System.IO.File]::WriteAllText(
-            $script:TestConfigPath,
-            $result.Toml,
-            $script:LikewebUtf8NoBom
-        )
-
-        $arguments = (
-            '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -ConfigPath "{1}" -ResultPath "{2}" -LogPath "{3}"' -f
-            $workerPath,
-            $script:TestConfigPath,
-            $script:TestResultPath,
-            $script:TestLogPath
-        )
-
-        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $startInfo.FileName = "powershell.exe"
-        $startInfo.Arguments = $arguments
-        $startInfo.WorkingDirectory = $PSScriptRoot
-        $startInfo.UseShellExecute = $true
-        $startInfo.Verb = "runas"
-        $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-
-        $script:TestWorkerProcess = [System.Diagnostics.Process]::Start($startInfo)
+        $script:TestWorkerProcess = Start-LikewebAction -Action Test -TomlContent $result.Toml
         $script:TestStartedAt = Get-Date
-        $script:LastTestLog = ""
+        $script:LastTestLog = ''
         $testDetailsSurface.Visible = $false
         $testDetailsLink.Visible = $false
         $testProgress.Visible = $true
-        Set-TestStatus "Проверяем подключение…" "Loading"
+        Set-TestStatus 'Проверяем подключение…' 'Loading'
         Update-EditorValidation
-        Update-EditorResponsiveLayout
+        Request-EditorLayout
         $testPollTimer.Start()
-    }
-    catch {
-        Stop-TestWorker
+    } catch {
         $testProgress.Visible = $false
-        Set-TestStatus (
-            "Не удалось начать проверку. " + $_.Exception.Message
-        ) "Error"
+        Set-TestStatus ('Не удалось начать проверку. ' + $_.Exception.Message) 'Error'
         Update-EditorValidation
-        Update-EditorResponsiveLayout
     }
 }
 
 function Poll-ServerTest {
-    if ($null -eq $script:TestWorkerProcess) {
-        $testPollTimer.Stop()
-        return
-    }
+    if ($null -eq $script:TestWorkerProcess) { $testPollTimer.Stop(); return }
+    try {
+        $result = Receive-LikewebJob $script:TestWorkerProcess
+        if ($null -ne $result) { Complete-ServerTest $result; return }
+        if (((Get-Date) - $script:TestStartedAt).TotalSeconds -gt 60 -and -not [IO.File]::Exists($script:TestWorkerProcess.CancelPath)) { Stop-TestWorker }
+    } catch { Write-LikewebManagerLog 'Не удалось прочитать состояние проверки' $_ }
+}
 
-    if (Test-Path -LiteralPath $script:TestResultPath) {
+function Poll-ManagerRequests {
+    $directory = Join-Path $script:LikewebLogDir 'manager_requests'
+    if (-not [IO.Directory]::Exists($directory)) { return }
+    foreach ($requestFile in @(Get-ChildItem -LiteralPath $directory -Filter '*.json' | Sort-Object CreationTime)) {
         try {
-            $json = [System.IO.File]::ReadAllText($script:TestResultPath)
-            $result = $json | ConvertFrom-Json
-            Complete-ServerTest $result
-        }
-        catch {
-            Complete-ServerTest ([pscustomobject]@{
-                Success = $false
-                PreviousConnectionRestored = $true
-                ErrorMessage = "Не удалось прочитать результат проверки."
-                LogTail = $_.Exception.Message
-            })
-        }
-        return
-    }
-
-    if ($script:TestWorkerProcess.HasExited) {
-        Complete-ServerTest ([pscustomobject]@{
-            Success = $false
-            PreviousConnectionRestored = $true
-            ErrorMessage = "Процесс проверки завершился без результата."
-            LogTail = if (Test-Path -LiteralPath $script:TestLogPath) {
-                [System.IO.File]::ReadAllText($script:TestLogPath)
+            $request = [IO.File]::ReadAllText($requestFile.FullName) | ConvertFrom-Json -ErrorAction Stop
+            [IO.File]::Delete($requestFile.FullName)
+            if (((Get-Date) - [datetime]::Parse($request.CreatedAt)).TotalMinutes -gt 2) { continue }
+            if ($request.Mode -eq 'Close') {
+                $form.Close()
+                Write-LikewebAtomicText (Join-Path $script:LikewebLogDir ('manager_reply_' + $request.Id + '.json')) (@{ Closed = [bool]$script:ManagerCloseAccepted } | ConvertTo-Json)
+                return
             }
-            else { "" }
-        })
-        return
-    }
-
-    if (((Get-Date) - $script:TestStartedAt).TotalSeconds -gt 50) {
-        Complete-ServerTest ([pscustomobject]@{
-            Success = $false
-            PreviousConnectionRestored = $false
-            ErrorMessage = "Превышено время ожидания проверки."
-            LogTail = if (Test-Path -LiteralPath $script:TestLogPath) {
-                [System.IO.File]::ReadAllText($script:TestLogPath)
-            }
-            else { "" }
-        })
+            $form.WindowState = 'Normal'
+            [void]$form.Activate()
+            if ($script:TestWorkerProcess) { continue }
+            if ($request.ProfileId) {
+                if ($script:CurrentView -ne 'Editor' -or (Confirm-DiscardChanges)) {
+                    Load-ProfileForEditing $request.ProfileId
+                    if ($request.Mode -eq 'Certificate' -and $script:EditingProfileId -eq $request.ProfileId) { Open-CertificateSection }
+                }
+            } elseif ($request.Mode -eq 'Add') { Show-NewServerPage }
+            else { Show-ServersPage }
+        } catch { Write-LikewebManagerLog 'Ошибка команды трея' $_ }
     }
 }
 
@@ -2455,6 +2319,17 @@ $serversMessageCopyButton = New-MessageCopyButton
 $serversMessageCopyButton.Location = [System.Drawing.Point]::new(1216, 8)
 $serversMessageCopyButton.Anchor = "Top,Right"
 $serversMessagePanel.Controls.Add($serversMessageCopyButton)
+
+$serversCertificateButton = New-FluentButton 'Добавить сертификат' 'Secondary' $null 230 32 'Добавить сертификат для сервера'
+$serversCertificateButton.Location = [Drawing.Point]::new(56,44)
+$serversCertificateButton.Visible = $false
+$serversCertificateButton.Add_Click({
+    $targetId = [string]$serversCertificateButton.Tag
+    if ($script:CurrentView -eq 'Editor' -and -not (Confirm-DiscardChanges)) { return }
+    Load-ProfileForEditing $targetId
+    if ($script:EditingProfileId -eq $targetId) { Open-CertificateSection }
+})
+$serversMessagePanel.Controls.Add($serversCertificateButton)
 
 $serversMessagePanel.Add_Resize({
     $serversMessageCopyButton.Left = [Math]::Max(60, $serversMessagePanel.ClientSize.Width - $serversMessageCopyButton.Width - 24)
@@ -2725,7 +2600,6 @@ function Set-EditorLoadingOverlay {
         $editorLoadingProgress.MarqueeAnimationSpeed = 25
         $editorLoadingOverlay.BringToFront()
         $editorLoadingOverlay.Refresh()
-        [System.Windows.Forms.Application]::DoEvents()
     }
     else {
         $editorLoadingProgress.MarqueeAnimationSpeed = 0
@@ -2792,9 +2666,12 @@ $certificateSurface = New-FluentSurface 296 8 $false
 $certificateSurface.Anchor = "Top,Left,Right"
 $editorContentHost.Controls.Add($certificateSurface)
 
-$certificateTitle = New-PageLabel "Сертификат" "Section"
-$certificateTitle.Location = [System.Drawing.Point]::new(16, 16)
-$certificateSurface.Controls.Add($certificateTitle)
+$certificateToggleButton = New-FluentButton 'Сертификат сервера · необязательно' 'Subtle' $script:IconChevronDown 580 36 'Развернуть или свернуть сертификат сервера'
+$certificateToggleButton.Location = [System.Drawing.Point]::new(12, 8)
+$certificateToggleButton.Anchor = 'Top,Left,Right'
+$certificateToggleButton.TextAlign = 'MiddleLeft'
+$certificateToggleButton.Add_Click({ Set-CertificateExpanded (-not $script:CertificateExpanded) })
+$certificateSurface.Controls.Add($certificateToggleButton)
 
 $certificateDropPanel = New-FluentSurface 106 8 $false
 $certificateDropPanel.Location = [System.Drawing.Point]::new(16, 50)
@@ -2830,7 +2707,7 @@ $certificateOrText.TextAlign = "MiddleCenter"
 $certificateOrText.Size = [System.Drawing.Size]::new(36, 22)
 $certificateEmptyPanel.Controls.Add($certificateOrText)
 
-$chooseCertificateButton = New-FluentButton "Выбрать файл" "Secondary" $null 122 32 "Выбрать сертификат"
+$chooseCertificateButton = New-FluentButton "Добавить PEM" "Secondary" $null 142 32 "Выбрать сертификат"
 $certificateEmptyPanel.Controls.Add($chooseCertificateButton)
 
 $certificateFilePanel = New-Object System.Windows.Forms.Panel
@@ -2881,7 +2758,7 @@ $certificateStatusIcon.Size = [System.Drawing.Size]::new(20, 20)
 $certificateStatusIcon.SizeMode = "CenterImage"
 $certificateStatusPanel.Controls.Add($certificateStatusIcon)
 
-$certificateStatusLabel = New-PageLabel "Выберите файл .pem вручную кнопкой выше." "Secondary"
+$certificateStatusLabel = New-PageLabel "Используется доверие Windows. PEM можно добавить при необходимости." "Secondary"
 $certificateStatusLabel.Location = [System.Drawing.Point]::new(28, 0)
 $certificateStatusLabel.Size = [System.Drawing.Size]::new(620, 38)
 $certificateStatusLabel.AutoSize = $false
@@ -3082,6 +2959,8 @@ $optionsHost.Controls.Add($ipv6CheckBox)
 $embedCertificateCheckBox = New-Object System.Windows.Forms.CheckBox
 $embedCertificateCheckBox.Text = "Встроить PEM в конфигурацию"
 $embedCertificateCheckBox.AutoSize = $true
+$embedCertificateCheckBox.Visible = $false
+$embedCertificateCheckBox.Enabled = $false
 $embedCertificateCheckBox.Font = $script:FontBody
 $embedCertificateCheckBox.AccessibleName = "Встроить сертификат"
 $optionsHost.Controls.Add($embedCertificateCheckBox)
@@ -3116,60 +2995,47 @@ $testDetailsSurface.Controls.Add($testDetailsTextBox)
 
 # -------------------- Responsive layout --------------------
 
+function Request-EditorLayout {
+    if ($script:LayoutUpdating) { $script:LayoutAgain = $true; return }
+    if ($script:LayoutPending -or $null -eq $form -or -not $form.IsHandleCreated -or $form.IsDisposed) { return }
+    $script:LayoutPending = $true
+    [void]$form.BeginInvoke([System.Windows.Forms.MethodInvoker]{
+        $script:LayoutPending = $false
+        if ($form.IsDisposed) { return }
+        Update-EditorResponsiveLayout
+    })
+}
+
 function Update-AdvancedGridLayout {
-    if ($null -eq $advancedGrid) {
-        return
-    }
-
-    $available = [Math]::Max(500, $advancedFieldsPanel.ClientSize.Width - 32)
-    $twoColumns = $available -ge 760
-    $columns = if ($twoColumns) { 2 } else { 1 }
+    if ($null -eq $advancedGrid) { return }
+    $available = [Math]::Max(260, $advancedFieldsPanel.ClientSize.Width - 32)
+    $columns = if ($available -ge 760) { 2 } else { 1 }
     $rows = [int][Math]::Ceiling($script:AdvancedFieldContainers.Count / [double]$columns)
-
     $advancedGrid.SuspendLayout()
     try {
-        $advancedGrid.Controls.Clear()
-        $advancedGrid.ColumnStyles.Clear()
-        $advancedGrid.RowStyles.Clear()
-        $advancedGrid.ColumnCount = $columns
-        $advancedGrid.RowCount = $rows
-        $advancedGrid.Width = $available
-
-        for ($column = 0; $column -lt $columns; $column++) {
-            $advancedGrid.ColumnStyles.Add(
-                ([System.Windows.Forms.ColumnStyle]::new(
-                    [System.Windows.Forms.SizeType]::Percent,
-                    [single](100 / $columns)
-                ))
-            )
+        # Keep every field attached to its parent, including during DPI/column changes.
+        if ($script:AdvancedColumns -ne $columns) {
+            $script:AdvancedColumns = $columns
+            $advancedGrid.ColumnStyles.Clear()
+            $advancedGrid.RowStyles.Clear()
+            $advancedGrid.RowCount = [Math]::Max($rows, $advancedGrid.RowCount)
+            $advancedGrid.ColumnCount = [Math]::Max($columns, $advancedGrid.ColumnCount)
+            for ($i = 0; $i -lt $script:AdvancedFieldContainers.Count; $i++) {
+                $item = $script:AdvancedFieldContainers[$i]
+                if (-not $advancedGrid.Controls.Contains($item.Container)) { [void]$advancedGrid.Controls.Add($item.Container) }
+                $advancedGrid.SetCellPosition($item.Container, [System.Windows.Forms.TableLayoutPanelCellPosition]::new(($i % $columns), [int][Math]::Floor($i / $columns)))
+                $item.Container.Dock = 'Fill'
+            }
+            $advancedGrid.ColumnCount = $columns
+            $advancedGrid.RowCount = $rows
+            for ($i = 0; $i -lt $columns; $i++) { [void]$advancedGrid.ColumnStyles.Add([System.Windows.Forms.ColumnStyle]::new('Percent', [single](100 / $columns))) }
+            for ($i = 0; $i -lt $rows; $i++) { [void]$advancedGrid.RowStyles.Add([System.Windows.Forms.RowStyle]::new('Absolute', [single]94)) }
         }
-
-        for ($row = 0; $row -lt $rows; $row++) {
-            $advancedGrid.RowStyles.Add(
-                ([System.Windows.Forms.RowStyle]::new(
-                    [System.Windows.Forms.SizeType]::Absolute,
-                    [single]94
-                ))
-            )
-        }
-
-        $columnWidth = [int]($available / $columns)
-        for ($i = 0; $i -lt $script:AdvancedFieldContainers.Count; $i++) {
-            $item = $script:AdvancedFieldContainers[$i]
-            $row = [int][Math]::Floor($i / $columns)
-            $column = $i % $columns
-            $item.Container.Width = $columnWidth - 12
-            $item.Container.Dock = "Fill"
-            $item.Input.Width = [Math]::Max(180, $item.Container.Width - 8)
-            $advancedGrid.Controls.Add($item.Container, $column, $row)
-        }
-
+        if ($advancedGrid.Width -ne $available) { $advancedGrid.Width = $available }
         $advancedGrid.Height = $rows * 94
-        $advancedFieldsPanel.Height = 50 + $advancedGrid.Height + 18
+        $advancedFieldsPanel.Height = 68 + $advancedGrid.Height
     }
-    finally {
-        $advancedGrid.ResumeLayout()
-    }
+    finally { $advancedGrid.ResumeLayout() }
 }
 
 function Update-EditorContentLayout {
@@ -3181,47 +3047,28 @@ function Update-EditorContentLayout {
     $y = 0
     $isEditing = -not [string]::IsNullOrWhiteSpace($script:EditingProfileId)
 
+    $certificateSurface.Visible = $true
     if ($isEditing) {
-        # The edit page contains only the full technical form. The text-import
-        # and certificate cards belong to the add-server workflow and are
-        # intentionally hidden here.
         $settingsSurface.Visible = $false
-        $certificateSurface.Visible = $false
         $summarySurface.Visible = $false
         $advancedToggleButton.Visible = $false
         $advancedFieldsPanel.Visible = $true
         $script:AdvancedVisible = $true
-
         Update-AdvancedGridLayout
         $advancedFieldsPanel.Left = 0
         $advancedFieldsPanel.Top = 0
-        $y = $advancedFieldsPanel.Height + $gap
+        $certificateSurface.Left = 0
+        $certificateSurface.Top = $advancedFieldsPanel.Bottom + $gap
+        $y = $certificateSurface.Bottom + $gap
     }
     else {
         $settingsSurface.Visible = $true
-        $certificateSurface.Visible = $true
         $advancedToggleButton.Visible = $true
-
-        $useTwoColumns = $editorContentHost.Width -ge 880
-        if ($useTwoColumns) {
-            $settingsSurface.Left = 0
-            $settingsSurface.Top = 0
-            $certificateSurface.Left = $settingsSurface.Width + $gap
-            $certificateSurface.Top = 0
-            $y = [Math]::Max(
-                $settingsSurface.Bottom,
-                $certificateSurface.Bottom
-            ) + $gap
-        }
-        else {
-            $settingsSurface.Left = 0
-            $settingsSurface.Top = $y
-            $y += $settingsSurface.Height + $gap
-
-            $certificateSurface.Left = 0
-            $certificateSurface.Top = $y
-            $y += $certificateSurface.Height + $gap
-        }
+        $settingsSurface.Left = 0
+        $settingsSurface.Top = 0
+        $certificateSurface.Left = 0
+        $certificateSurface.Top = $settingsSurface.Bottom + $gap
+        $y = $certificateSurface.Bottom + $gap
 
         # Keep the entry to all fields directly below the import cards so it
         # remains visible even after the recognition summary appears.
@@ -3265,225 +3112,224 @@ function Update-EditorContentLayout {
 }
 
 function Update-EditorResponsiveLayout {
-    if ($null -eq $editorScrollPanel) {
-        return
-    }
+    if ($script:LayoutUpdating) { return }
+    $script:LayoutUpdating = $true
+    try {
+        if ($null -eq $editorScrollPanel) {
+            return
+        }
 
-    $viewportWidth = $editorScrollPanel.ClientSize.Width
-    $contentWidth = [Math]::Min(
-        1040,
-        [Math]::Max(680, $viewportWidth - 48)
-    )
-    $editorContentHost.Width = $contentWidth
-    $editorContentHost.Left = [Math]::Max(
-        24,
-        [int](($viewportWidth - $contentWidth) / 2)
-    )
+        $viewportWidth = $editorScrollPanel.ClientSize.Width
+        $contentWidth = [Math]::Min(
+            1040,
+            [Math]::Max(680, $viewportWidth - 48)
+        )
+        $editorContentHost.Width = $contentWidth
+        $editorContentHost.Left = [Math]::Max(
+            24,
+            [int](($viewportWidth - $contentWidth) / 2)
+        )
 
-    $useTwoColumns = $contentWidth -ge 880
-    $columnGap = 24
-
-    if ($useTwoColumns) {
-        $columnWidth = [int](($contentWidth - $columnGap) / 2)
-        $settingsSurface.Width = $columnWidth
-        $certificateSurface.Width = $contentWidth - $columnWidth - $columnGap
-    }
-    else {
         $settingsSurface.Width = $contentWidth
         $certificateSurface.Width = $contentWidth
-    }
 
-    foreach ($surface in @(
-        $summarySurface,
-        $advancedFieldsPanel,
-        $testDetailsSurface
-    )) {
-        $surface.Width = $contentWidth
-    }
-
-    $advancedToggleButton.Width = [Math]::Min(280, $contentWidth)
-
-    # Settings section. The paste command shares the title row; the text
-    # editor starts below it and keeps a stable layout at higher DPI.
-    $settingsSurface.Height = 296
-    $pasteButton.Top = 8
-    $pasteButton.Left = $settingsSurface.ClientSize.Width - $pasteButton.Width - 16
-
-    $messageTextBox.Left = 16
-    $messageTextBox.Top = 54
-    $messageTextBox.Width = $settingsSurface.ClientSize.Width - 32
-    $messageTextBox.Height = 142
-
-    $parseButton.Left = 16
-    $parseButton.Top = 208
-
-    $recognitionStatusPanel.Left = 16
-    $recognitionStatusPanel.Top = 246
-    $recognitionStatusPanel.Width = [Math]::Max(
-        180,
-        $settingsSurface.ClientSize.Width - 32
-    )
-    $recognitionStatusLabel.Width = [Math]::Max(
-        140,
-        $recognitionStatusPanel.ClientSize.Width - 28
-    )
-
-    # Certificate section, equal in height to the settings section.
-    $certificateSurface.Height = 296
-    $certificateDropPanel.Left = 16
-    $certificateDropPanel.Top = 52
-    $certificateDropPanel.Width = $certificateSurface.ClientSize.Width - 32
-    $certificateDropPanel.Height = 170
-
-    $certificateStatusPanel.Left = 16
-    $certificateStatusPanel.Top = 240
-    $certificateStatusPanel.Width = [Math]::Max(
-        180,
-        $certificateSurface.ClientSize.Width - 32
-    )
-    $certificateStatusLabel.Width = [Math]::Max(
-        140,
-        $certificateStatusPanel.ClientSize.Width - 28
-    )
-
-    $emptyWidth = $certificateDropPanel.ClientSize.Width
-    $certificateEmptyIcon.Left = [int](
-        ($emptyWidth - $certificateEmptyIcon.Width) / 2
-    )
-    $certificateEmptyIcon.Top = 16
-    $certificateEmptyText.Left = [int](
-        ($emptyWidth - $certificateEmptyText.Width) / 2
-    )
-    $certificateEmptyText.Top = 54
-    $certificateOrText.Left = [int](
-        ($emptyWidth - $certificateOrText.Width -
-         $chooseCertificateButton.Width - 8) / 2
-    )
-    $certificateOrText.Top = 104
-    $chooseCertificateButton.Left = (
-        $certificateOrText.Left + $certificateOrText.Width + 8
-    )
-    $chooseCertificateButton.Top = 98
-
-    # Selected certificate card. On a narrow column the file information stays
-    # readable and the secondary actions move to the lower right.
-    $certificateFileIcon.Left = 18
-    $certificateFileIcon.Top = 30
-    $certificateFileNameLabel.Left = 66
-    $certificateFileNameLabel.Top = 22
-    $certificateFileDetailsLabel.Left = 66
-    $certificateFileDetailsLabel.Top = 54
-
-    $removeCertificateButton.Left = (
-        $certificateDropPanel.ClientSize.Width -
-        $removeCertificateButton.Width - 14
-    )
-    $removeCertificateButton.Top = 116
-    $replaceCertificateButton.Left = (
-        $removeCertificateButton.Left -
-        $replaceCertificateButton.Width - 8
-    )
-    $replaceCertificateButton.Top = 116
-
-    $certificateFileNameLabel.Width = [Math]::Max(
-        150,
-        $certificateDropPanel.ClientSize.Width -
-        $certificateFileNameLabel.Left - 18
-    )
-    $certificateFileDetailsLabel.Width = $certificateFileNameLabel.Width
-
-    $summaryTable.Width = $summarySurface.ClientSize.Width - 32
-
-    $hideTestDetailsButton.Left = (
-        $testDetailsSurface.ClientSize.Width -
-        $hideTestDetailsButton.Width - 16
-    )
-    $hideTestDetailsButton.Top = 12
-    $testDetailsTextBox.Width = $testDetailsSurface.ClientSize.Width - 32
-
-    # Footer adapts instead of squeezing Russian captions into narrow buttons.
-    $footerActions.Width = (
-        $saveConnectButton.Width +
-        $saveButton.Width +
-        $cancelButton.Width + 24
-    )
-
-    $cancelButton.Left = 0
-    $saveButton.Left = $cancelButton.Right + 8
-    $saveConnectButton.Left = $saveButton.Right + 8
-    $cancelButton.Top = 2
-    $saveButton.Top = 2
-    $saveConnectButton.Top = 2
-
-    if ($editorFooter.ClientSize.Width -ge 920) {
-        if ($editorFooter.Height -ne 82) {
-            $editorFooter.Height = 82
+        foreach ($surface in @(
+            $summarySurface,
+            $advancedFieldsPanel,
+            $testDetailsSurface
+        )) {
+            $surface.Width = $contentWidth
         }
-        $testButton.Left = 24
-        $testButton.Top = 20
-        $footerActions.Top = 18
-        $footerActions.Left = (
-            $editorFooter.ClientSize.Width -
-            $footerActions.Width - 24
+
+        $advancedToggleButton.Width = [Math]::Min(280, $contentWidth)
+
+        # Settings section. The paste command shares the title row; the text
+        # editor starts below it and keeps a stable layout at higher DPI.
+        $settingsSurface.Height = 296
+        $pasteButton.Top = 8
+        $pasteButton.Left = $settingsSurface.ClientSize.Width - $pasteButton.Width - 16
+
+        $messageTextBox.Left = 16
+        $messageTextBox.Top = 54
+        $messageTextBox.Width = $settingsSurface.ClientSize.Width - 32
+        $messageTextBox.Height = 142
+
+        $parseButton.Left = 16
+        $parseButton.Top = 208
+
+        $recognitionStatusPanel.Left = 16
+        $recognitionStatusPanel.Top = 246
+        $recognitionStatusPanel.Width = [Math]::Max(
+            180,
+            $settingsSurface.ClientSize.Width - 32
+        )
+        $recognitionStatusLabel.Width = [Math]::Max(
+            140,
+            $recognitionStatusPanel.ClientSize.Width - 28
         )
 
-        $testStatusPanel.Left = $testButton.Right + 16
-        $testStatusPanel.Top = 18
-        $testStatusPanel.Width = [Math]::Max(
+        $certificateSurface.Height = if ($script:CertificateExpanded) { 296 } else { 96 }
+        $certificateToggleButton.Width = $certificateSurface.ClientSize.Width - 24
+        $certificateDropPanel.Visible = $script:CertificateExpanded
+        $certificateDropPanel.Left = 16
+        $certificateDropPanel.Top = 52
+        $certificateDropPanel.Width = $certificateSurface.ClientSize.Width - 32
+        $certificateDropPanel.Height = 170
+
+        $certificateStatusPanel.Left = 16
+        $certificateStatusPanel.Top = if ($script:CertificateExpanded) { 240 } else { 48 }
+        $certificateStatusPanel.Width = [Math]::Max(
             180,
-            $footerActions.Left - $testStatusPanel.Left - 16
+            $certificateSurface.ClientSize.Width - 32
         )
-    }
-    else {
-        if ($editorFooter.Height -ne 132) {
-            $editorFooter.Height = 132
+        $certificateStatusLabel.Width = [Math]::Max(
+            140,
+            $certificateStatusPanel.ClientSize.Width - 28
+        )
+
+        $emptyWidth = $certificateDropPanel.ClientSize.Width
+        $certificateEmptyIcon.Left = [int](
+            ($emptyWidth - $certificateEmptyIcon.Width) / 2
+        )
+        $certificateEmptyIcon.Top = 16
+        $certificateEmptyText.Left = [int](
+            ($emptyWidth - $certificateEmptyText.Width) / 2
+        )
+        $certificateEmptyText.Top = 54
+        $certificateOrText.Left = [int](
+            ($emptyWidth - $certificateOrText.Width -
+             $chooseCertificateButton.Width - 8) / 2
+        )
+        $certificateOrText.Top = 104
+        $chooseCertificateButton.Left = (
+            $certificateOrText.Left + $certificateOrText.Width + 8
+        )
+        $chooseCertificateButton.Top = 98
+
+        # Selected certificate card. On a narrow column the file information stays
+        # readable and the secondary actions move to the lower right.
+        $certificateFileIcon.Left = 18
+        $certificateFileIcon.Top = 30
+        $certificateFileNameLabel.Left = 66
+        $certificateFileNameLabel.Top = 22
+        $certificateFileDetailsLabel.Left = 66
+        $certificateFileDetailsLabel.Top = 54
+
+        $removeCertificateButton.Left = (
+            $certificateDropPanel.ClientSize.Width -
+            $removeCertificateButton.Width - 14
+        )
+        $removeCertificateButton.Top = 116
+        $replaceCertificateButton.Left = (
+            $removeCertificateButton.Left -
+            $replaceCertificateButton.Width - 8
+        )
+        $replaceCertificateButton.Top = 116
+
+        $certificateFileNameLabel.Width = [Math]::Max(
+            150,
+            $certificateDropPanel.ClientSize.Width -
+            $certificateFileNameLabel.Left - 18
+        )
+        $certificateFileDetailsLabel.Width = $certificateFileNameLabel.Width
+
+        $summaryTable.Width = $summarySurface.ClientSize.Width - 32
+
+        $hideTestDetailsButton.Left = (
+            $testDetailsSurface.ClientSize.Width -
+            $hideTestDetailsButton.Width - 16
+        )
+        $hideTestDetailsButton.Top = 12
+        $testDetailsTextBox.Width = $testDetailsSurface.ClientSize.Width - 32
+
+        # Footer adapts instead of squeezing Russian captions into narrow buttons.
+        $footerActions.Width = (
+            $saveConnectButton.Width +
+            $saveButton.Width +
+            $cancelButton.Width + 24
+        )
+
+        $cancelButton.Left = 0
+        $saveButton.Left = $cancelButton.Right + 8
+        $saveConnectButton.Left = $saveButton.Right + 8
+        $cancelButton.Top = 2
+        $saveButton.Top = 2
+        $saveConnectButton.Top = 2
+
+        if ($editorFooter.ClientSize.Width -ge 920) {
+            if ($editorFooter.Height -ne 82) {
+                $editorFooter.Height = 82
+            }
+            $testButton.Left = 24
+            $testButton.Top = 20
+            $footerActions.Top = 18
+            $footerActions.Left = (
+                $editorFooter.ClientSize.Width -
+                $footerActions.Width - 24
+            )
+
+            $testStatusPanel.Left = $testButton.Right + 16
+            $testStatusPanel.Top = 18
+            $testStatusPanel.Width = [Math]::Max(
+                180,
+                $footerActions.Left - $testStatusPanel.Left - 16
+            )
         }
-        $testButton.Left = 24
-        $testButton.Top = 14
-        $testStatusPanel.Left = $testButton.Right + 12
-        $testStatusPanel.Top = 12
-        $testStatusPanel.Width = [Math]::Max(
-            180,
-            $editorFooter.ClientSize.Width - $testStatusPanel.Left - 24
-        )
-        $footerActions.Top = 72
-        $footerActions.Left = [Math]::Max(
-            24,
-            $editorFooter.ClientSize.Width -
-            $footerActions.Width - 24
-        )
-    }
+        else {
+            if ($editorFooter.Height -ne 132) {
+                $editorFooter.Height = 132
+            }
+            $testButton.Left = 24
+            $testButton.Top = 14
+            $testStatusPanel.Left = $testButton.Right + 12
+            $testStatusPanel.Top = 12
+            $testStatusPanel.Width = [Math]::Max(
+                180,
+                $editorFooter.ClientSize.Width - $testStatusPanel.Left - 24
+            )
+            $footerActions.Top = 72
+            $footerActions.Left = [Math]::Max(
+                24,
+                $editorFooter.ClientSize.Width -
+                $footerActions.Width - 24
+            )
+        }
 
-    $testStatusIcon.Left = 0
-    $testStatusIcon.Top = 12
-    $testDetailsLink.Top = 12
-    $testDetailsLink.Left = [Math]::Max(
-        28,
-        $testStatusPanel.ClientSize.Width - $testDetailsLink.Width
-    )
-    $detailsReserve = if ($testDetailsLink.Visible) {
-        $testDetailsLink.Width + 14
-    }
-    else {
-        0
-    }
-    $testStatusLabel.Left = 28
-    $testStatusLabel.Top = 0
-    $testStatusLabel.Height = 40
-    $testStatusLabel.Width = [Math]::Max(
-        100,
-        $testStatusPanel.ClientSize.Width - 28 - $detailsReserve
-    )
-    $testProgress.Left = 28
-    $testProgress.Top = 39
-    $testProgress.Width = [Math]::Max(
-        80,
-        [Math]::Min(180, $testStatusLabel.Width)
-    )
-    $testStatusPanel.BringToFront()
+        $testStatusIcon.Left = 0
+        $testStatusIcon.Top = 12
+        $testDetailsLink.Top = 12
+        $testDetailsLink.Left = [Math]::Max(
+            28,
+            $testStatusPanel.ClientSize.Width - $testDetailsLink.Width
+        )
+        $detailsReserve = if ($testDetailsLink.Visible) {
+            $testDetailsLink.Width + 14
+        }
+        else {
+            0
+        }
+        $testStatusLabel.Left = 28
+        $testStatusLabel.Top = 0
+        $testStatusLabel.Height = 40
+        $testStatusLabel.Width = [Math]::Max(
+            100,
+            $testStatusPanel.ClientSize.Width - 28 - $detailsReserve
+        )
+        $testProgress.Left = 28
+        $testProgress.Top = 39
+        $testProgress.Width = [Math]::Max(
+            80,
+            [Math]::Min(180, $testStatusLabel.Width)
+        )
+        $testStatusPanel.BringToFront()
 
-    Update-AdvancedGridLayout
-    Update-EditorContentLayout
+        Update-AdvancedGridLayout
+        Update-EditorContentLayout
+    }
+    finally {
+        $script:LayoutUpdating = $false
+        if ($script:LayoutAgain) { $script:LayoutAgain = $false; Request-EditorLayout }
+    }
 }
 
 # -------------------- Events --------------------
@@ -3570,18 +3416,21 @@ $editorInputs = @(
 
 foreach ($control in $editorInputs) {
     $control.Add_TextChanged({
+        if ($script:LoadingEditor) { return }
         Mark-EditorDirty
         Update-EditorHeader
-        Update-EditorValidation
+        $validationTimer.Stop()
+        $validationTimer.Start()
     })
 }
 
 $hostnameTextBox.Add_Validated({
+    if ($script:LoadingEditor) { return }
     if ($null -ne $script:SelectedCertificateInfo) {
         if ($script:SelectedCertificateInfo.MetadataRead -eq $false) {
             Set-CertificateStatus "PEM загружен и будет встроен. Метаданные X.509 не проверены." "Warning"
         }
-        elseif (-not (Test-CertificateMatchesHostname $(if ($script:SelectedCertificateInfo.PSObject.Properties.Name -contains "DnsNames") { $script:SelectedCertificateInfo.DnsNames } else { $script:SelectedCertificateInfo.DnsName }) $hostnameTextBox.Text)) {
+        elseif (-not $script:SelectedCertificateInfo.IsCertificateAuthority -and -not (Test-CertificateMatchesHostname $(if ($script:SelectedCertificateInfo.PSObject.Properties.Name -contains "DnsNames") { $script:SelectedCertificateInfo.DnsNames } else { $script:SelectedCertificateInfo.DnsName }) $hostnameTextBox.Text)) {
             Set-CertificateStatus "Сертификат не соответствует домену. Проверьте PEM или домен сервера." "Error"
         }
         elseif ($script:SelectedCertificateInfo.NotAfter -lt (Get-Date)) {
@@ -3593,9 +3442,9 @@ $hostnameTextBox.Add_Validated({
     }
 })
 
-$protocolComboBox.Add_SelectedIndexChanged({ Mark-EditorDirty; Update-EditorValidation })
-$ipv6CheckBox.Add_CheckedChanged({ Mark-EditorDirty; Update-EditorValidation })
-$embedCertificateCheckBox.Add_CheckedChanged({ Mark-EditorDirty; Update-EditorValidation })
+$protocolComboBox.Add_SelectedIndexChanged({ if (-not $script:LoadingEditor) { Mark-EditorDirty; Update-EditorValidation } })
+$ipv6CheckBox.Add_CheckedChanged({ if (-not $script:LoadingEditor) { Mark-EditorDirty; Update-EditorValidation } })
+$embedCertificateCheckBox.Add_CheckedChanged({ if (-not $script:LoadingEditor) { Mark-EditorDirty; Update-EditorValidation } })
 
 $testButton.Add_Click({ Start-EditorServerTest })
 $saveButton.Add_Click({ Save-EditorProfile $false })
@@ -3617,21 +3466,48 @@ $testPollTimer = New-Object System.Windows.Forms.Timer
 $testPollTimer.Interval = 300
 $testPollTimer.Add_Tick({ Poll-ServerTest })
 
+$validationTimer = New-Object System.Windows.Forms.Timer
+$validationTimer.Interval = 250
+$validationTimer.Add_Tick({ $validationTimer.Stop(); Update-EditorValidation })
+
 $serverRefreshTimer = New-Object System.Windows.Forms.Timer
 $serverRefreshTimer.Interval = 2000
 $serverRefreshTimer.Add_Tick({
+    Poll-ManagerRequests
+    if ($null -ne $script:ConnectionJob) {
+        try {
+            $jobResult = Receive-LikewebJob $script:ConnectionJob
+            if ($null -ne $jobResult) {
+                $script:ConnectionJob = $null
+                $script:OperationProfileId = ''
+                $script:OperationKind = ''
+                if ($jobResult.Success) { Set-ServersMessage 'Success' 'Операция завершена.' }
+                else {
+                    Set-ServersMessage 'Error' $jobResult.ErrorMessage
+                    if ($jobResult.CanAddCertificate -and $jobResult.ProfileId) {
+                        $serversCertificateButton.Tag = $jobResult.ProfileId
+                        $serversCertificateButton.Visible = $true
+                        $serversMessagePanel.Height = 86
+                    }
+                }
+                Refresh-ServerList
+            }
+        } catch { Write-LikewebManagerLog 'Ошибка результата подключения' $_ }
+    }
     if ($script:CurrentView -eq "Servers") {
         Refresh-ServerList
+    } elseif (-not $script:LoadingEditor) {
+        Update-EditorValidation
     }
 })
 $serverRefreshTimer.Start()
 
 $serversFlow.Add_Resize({ Resize-ServerRows })
-$editorScrollPanel.Add_Resize({ Update-EditorResponsiveLayout })
-$editorFooter.Add_Resize({ Update-EditorResponsiveLayout })
+$editorScrollPanel.Add_Resize({ Request-EditorLayout })
+$editorFooter.Add_Resize({ Request-EditorLayout })
 $form.Add_Resize({
     Resize-ServerRows
-    Update-EditorResponsiveLayout
+    Request-EditorLayout
 })
 
 $form.Add_KeyDown({
@@ -3661,6 +3537,12 @@ $form.Add_KeyDown({
 
 $form.Add_FormClosing({
     param($sender, $eventArgs)
+    if ($script:TestWorkerProcess) {
+        $eventArgs.Cancel = $true
+        $script:CloseAfterTest = $true
+        Stop-TestWorker
+        return
+    }
     if ($script:CurrentView -eq "Editor" -and $script:EditorDirty) {
         if (-not (Confirm-DiscardChanges)) {
             $eventArgs.Cancel = $true
@@ -3668,6 +3550,8 @@ $form.Add_FormClosing({
         }
     }
 
+    $script:ManagerCloseAccepted = $true
+    $validationTimer.Stop()
     $autoRecognitionTimer.Stop()
     $testPollTimer.Stop()
     $serverRefreshTimer.Stop()
@@ -3696,7 +3580,8 @@ $backButton.TabIndex = 0
 $pasteButton.TabIndex = 1
 $messageTextBox.TabIndex = 2
 $parseButton.TabIndex = 3
-$certificateDropPanel.TabIndex = 4
+$certificateToggleButton.TabIndex = 4
+$certificateDropPanel.TabIndex = 5
 $chooseCertificateButton.TabIndex = 5
 $advancedToggleButton.TabIndex = 6
 $displayNameTextBox.TabIndex = 7
@@ -3740,6 +3625,7 @@ $form.Add_Shown({
 
 if (-not [string]::IsNullOrWhiteSpace($ProfileId)) {
     Load-ProfileForEditing $ProfileId
+    if ($Mode -eq 'Certificate' -and $script:EditingProfileId -eq $ProfileId) { Open-CertificateSection }
 }
 elseif ($Mode -eq "Add") {
     Show-NewServerPage
@@ -3761,4 +3647,10 @@ catch {
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Error
     )
+}
+
+finally {
+    $script:ManagerMutex.ReleaseMutex()
+    $script:ManagerMutex.Dispose()
+    $script:UiToolTip.Dispose()
 }

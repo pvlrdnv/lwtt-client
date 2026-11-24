@@ -1,14 +1,16 @@
 @echo off
 cd /d "%~dp0"
+set "LWTT_RUNTIME=%~dp0"
 
-net session >nul 2>&1
+set "LWTT_SELF=%~f0"
+powershell.exe -NoProfile -Command "$identity = [Security.Principal.WindowsIdentity]::GetCurrent(); $principal = New-Object Security.Principal.WindowsPrincipal($identity); if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { exit 0 }; exit 1" >nul 2>&1
 if %errorlevel% neq 0 (
-    powershell.exe -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    powershell.exe -NoProfile -Command "Start-Process -FilePath $env:LWTT_SELF -Verb RunAs"
     exit /b
 )
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-"$scriptPath = Join-Path '%~dp0' 'lwtt_tray.ps1';" ^
+"$scriptPath = Join-Path $env:LWTT_RUNTIME 'lwtt_tray.ps1';" ^
 "$userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name;" ^
 "$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{0}""' -f $scriptPath);" ^
 "$trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId;" ^

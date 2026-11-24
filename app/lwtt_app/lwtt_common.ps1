@@ -5,7 +5,9 @@ $script:LikewebInstallRoot = Split-Path -Parent $script:LikewebBaseDir
 if ([string]::IsNullOrWhiteSpace($script:LikewebInstallRoot)) {
     $script:LikewebInstallRoot = $script:LikewebBaseDir
 }
-$script:LikewebAppVersion = "4.16"
+$versionPath = Join-Path $script:LikewebBaseDir 'VERSION'
+if (-not (Test-Path -LiteralPath $versionPath)) { $versionPath = Join-Path (Split-Path -Parent $script:LikewebInstallRoot) 'VERSION' }
+$script:LikewebAppVersion = if (Test-Path -LiteralPath $versionPath) { ([IO.File]::ReadAllText($versionPath)).Trim() } else { 'unknown' }
 $script:LikewebProfilesDir = Join-Path $script:LikewebBaseDir "profiles"
 $script:LikewebCertificatesDir = Join-Path $script:LikewebProfilesDir "certificates"
 $script:LikewebBackupsDir = Join-Path $script:LikewebProfilesDir "backups"
@@ -307,6 +309,8 @@ function ConvertTo-LikewebSafeId {
         throw "Не удалось сформировать служебный идентификатор сервера."
     }
 
+    if ($safe.Length -gt 128) { throw 'Служебное имя сервера не должно быть длиннее 128 символов.' }
+    if ($safe -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') { throw 'Это служебное имя зарезервировано Windows. Выберите другое имя.' }
     return $safe
 }
 
@@ -322,22 +326,8 @@ function ConvertTo-LikewebTomlString {
     $result = $result.Replace("`r", '\r')
     $result = $result.Replace("`n", '\n')
     $result = $result.Replace("`t", '\t')
-    return $result
-}
-
-function ConvertFrom-LikewebTomlString {
-    param([string]$Value)
-
-    if ($null -eq $Value) {
-        return ""
-    }
-
-    $result = $Value
-    $result = $result.Replace('\n', "`n")
-    $result = $result.Replace('\r', "`r")
-    $result = $result.Replace('\t', "`t")
-    $result = $result.Replace('\"', '"')
-    $result = $result.Replace('\\', '\')
+    $result = $result.Replace([string][char]8, '\b').Replace([string][char]12, '\f')
+    if ($result -match '[\x00-\x07\x0B\x0E-\x1F\x7F]') { throw 'Недопустимый управляющий символ.' }
     return $result
 }
 
@@ -361,7 +351,7 @@ function Get-LikewebFieldAfterLabel {
         $line = $Lines[$i].Trim()
 
         foreach ($pattern in $Patterns) {
-            if ($line -match ("^(?i:" + $pattern + ")\s*(?:[:\-–—]\s*)?(.*)$")) {
+            if ($line -match ("^(?i:" + $pattern + ")\s*(?:[:\-–\u2014]\s*)?(.*)$")) {
                 $sameLineValue = $Matches[1].Trim()
 
                 if (-not [string]::IsNullOrWhiteSpace($sameLineValue)) {
@@ -370,6 +360,7 @@ function Get-LikewebFieldAfterLabel {
 
                 for ($j = $i + 1; $j -lt $Lines.Count; $j++) {
                     $next = $Lines[$j].Trim()
+                    if ($next -match '^(?i:Server\s+name|Имя\s+сервера|Address|Адрес|Domain\s+name(?:\s+from\s+server\s+certificate)?|Доменное\s+имя.*|Username|User\s+name|Логин|Имя\s+пользователя|Password|Пароль|Protocol|Протокол|Allow\s+IPv6.*|Разрешить\s+IPv6.*|Self-signed\s+certificate|Сертификат)\s*:?[ \t]*$') { return "" }
                     if (-not [string]::IsNullOrWhiteSpace($next)) {
                         return $next
                     }
@@ -399,7 +390,7 @@ function Get-LikewebDisplayNameFromHeader {
 
         $candidate = $line
         $candidate = $candidate -replace '^[^\p{L}\p{N}]+', ''
-        $candidate = $candidate -replace '\s*[—–-]\s*(?i:ручной\s+ввод|manual\s+input).*$',''
+        $candidate = $candidate -replace '\s*[\u2014–-]\s*(?i:ручной\s+ввод|manual\s+input).*$',''
         $candidate = $candidate.Trim()
 
         if (
@@ -475,44 +466,12 @@ function Parse-LikewebSettingsMessage {
     }
 }
 
-function Normalize-LikewebAddress {
-    param([string]$Address)
-
-    $value = $Address.Trim()
-
-    if ([string]::IsNullOrWhiteSpace($value)) {
-        throw "Не указан адрес сервера."
-    }
-
-    if ($value -match '^\[[^\]]+\]:\d{1,5}$') {
-        return $value
-    }
-
-    if ($value -match '^[^:\s]+:\d{1,5}$') {
-        return $value
-    }
-
-    if ($value -match '^[^:\s]+$') {
-        return ($value + ":443")
-    }
-
-    throw "Адрес должен иметь формат domain.example:443 или 1.2.3.4:443."
-}
-
 function Normalize-LikewebProtocol {
     param([string]$Protocol)
-
     $value = $Protocol.Trim().ToLowerInvariant()
-
-    if ($value -match '3') {
-        return "http3"
-    }
-
-    if ($value -match '2' -or [string]::IsNullOrWhiteSpace($value)) {
-        return "http2"
-    }
-
-    throw "Поддерживаются только протоколы HTTP/2 и HTTP/3."
+    if (-not $value) { return 'http2' }
+    if ($value -match '^(?:http[ /]?)?([23])(?:\.0)?$' -or $value -match '^h([23])$') { return 'http' + $Matches[1] }
+    throw 'Поддерживаются только протоколы HTTP/2 и HTTP/3.'
 }
 
 function ConvertTo-LikewebBoolean {
@@ -588,6 +547,44 @@ function New-LikewebX509Certificate {
     throw ("Windows не смог прочитать метаданные X.509: " + (($errors | Select-Object -Unique) -join "; "))
 }
 
+function Read-LikewebDerLength {
+    param([byte[]]$Bytes, [ref]$Offset, [int]$Limit)
+    if ($Offset.Value -ge $Limit) { throw 'Неполное расширение SAN сертификата.' }
+    $length = [int]$Bytes[$Offset.Value]; $Offset.Value++
+    if ($length -ge 128) {
+        $count = $length -band 127
+        if ($count -lt 1 -or $count -gt 4 -or $Offset.Value + $count -gt $Limit) { throw 'Некорректная длина SAN сертификата.' }
+        $length = [long]0
+        for ($i=0; $i -lt $count; $i++) { $length = $length * 256 + $Bytes[$Offset.Value]; $Offset.Value++ }
+    }
+    if ($length -gt $Limit - $Offset.Value) { throw 'Расширение SAN обрывается до конца значения.' }
+    return [int]$length
+}
+
+function Get-LikewebCertificateSanNames {
+    param([byte[]]$Bytes)
+    if ($Bytes.Length -lt 2 -or $Bytes[0] -ne 48) { throw 'Некорректное расширение SAN сертификата.' }
+    $offset = 1
+    $length = Read-LikewebDerLength $Bytes ([ref]$offset) $Bytes.Length
+    $end = $offset + $length
+    if ($end -ne $Bytes.Length) { throw 'Некорректная длина последовательности SAN.' }
+    while ($offset -lt $end) {
+        $tag = [int]$Bytes[$offset]; $offset++
+        $length = Read-LikewebDerLength $Bytes ([ref]$offset) $end
+        if ($tag -eq 130) {
+            if ($length -lt 1) { throw 'Пустое DNS-имя в SAN.' }
+            for ($i=$offset; $i -lt $offset+$length; $i++) { if ($Bytes[$i] -gt 127) { throw 'DNS-имя SAN должно использовать ASCII.' } }
+            [Text.Encoding]::ASCII.GetString($Bytes,$offset,$length).TrimEnd('.').ToLowerInvariant()
+        } elseif ($tag -eq 135) {
+            if ($length -notin @(4,16)) { throw 'Некорректный IP-адрес в SAN.' }
+            $address = New-Object byte[] $length
+            [Array]::Copy($Bytes,$offset,$address,0,$length)
+            ([Net.IPAddress]::new($address)).ToString()
+        }
+        $offset += $length
+    }
+}
+
 function Get-LikewebCertificateInformationFromPem {
     param([string]$Pem)
 
@@ -635,6 +632,7 @@ function Get-LikewebCertificateInformationFromPem {
             NotBefore = [DateTime]::MinValue
             NotAfter = [DateTime]::MaxValue
             IsSelfSigned = $false
+            IsCertificateAuthority = $false
             DnsName = ""
             DnsNames = @()
             MetadataRead = $false
@@ -642,94 +640,39 @@ function Get-LikewebCertificateInformationFromPem {
         }
     }
 
-    $dnsNames = New-Object System.Collections.Generic.List[string]
-
-    # GetNameInfo may return only one SAN entry. On some Windows builds the
-    # wildcard entry is returned even when the certificate also contains the
-    # exact host name. Collect every available DNS name instead of relying on
-    # the first value only.
     try {
-        $primaryDnsName = $certificate.GetNameInfo(
-            [System.Security.Cryptography.X509Certificates.X509NameType]::DnsName,
-            $false
-        )
-        if (-not [string]::IsNullOrWhiteSpace($primaryDnsName)) {
-            $dnsNames.Add($primaryDnsName.Trim())
+        $san = @($certificate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.17' })
+        if ($san.Count) {
+            # Decode DER directly: extension.Format() depends on the Windows UI language.
+            $dnsNames = @(Get-LikewebCertificateSanNames $san[0].RawData)
+        } else {
+            # Compatibility fallback for older self-signed leaf certificates without SAN.
+            $commonName = $certificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::DnsName,$false)
+            $dnsNames = @($commonName | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('.').ToLowerInvariant() })
         }
-    }
-    catch {
-    }
-
-    try {
+        $isCa = $false
         foreach ($extension in $certificate.Extensions) {
-            if ($extension.Oid.Value -ne "2.5.29.17") {
-                continue
-            }
-
-            $formattedSan = $extension.Format($false)
-            foreach ($match in [regex]::Matches(
-                $formattedSan,
-                '(?i)(?:DNS(?: Name)?\s*=|DNS:)\s*([^,;\r\n]+)'
-            )) {
-                $candidate = $match.Groups[1].Value.Trim()
-                if (-not [string]::IsNullOrWhiteSpace($candidate)) {
-                    $dnsNames.Add($candidate)
-                }
+            if ($extension.Oid.Value -eq '2.5.29.19') {
+                $constraints = [Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new()
+                $constraints.CopyFrom($extension)
+                $isCa = $constraints.CertificateAuthority
             }
         }
-    }
-    catch {
-    }
-
-    # The Common Name is a useful compatibility fallback for older or very
-    # small self-signed certificates. SAN values still take precedence.
-    try {
-        $cnMatch = [regex]::Match(
-            $certificate.Subject,
-            '(?i)(?:^|,\s*)CN\s*=\s*(?:"([^"]+)"|([^,]+))'
-        )
-        if ($cnMatch.Success) {
-            $commonName = if (-not [string]::IsNullOrWhiteSpace($cnMatch.Groups[1].Value)) {
-                $cnMatch.Groups[1].Value.Trim()
-            }
-            else {
-                $cnMatch.Groups[2].Value.Trim()
-            }
-            if (-not [string]::IsNullOrWhiteSpace($commonName)) {
-                $dnsNames.Add($commonName)
-            }
+        return [pscustomobject]@{
+            Pem = $normalizedPem
+            Count = $matches.Count
+            Subject = $certificate.Subject
+            Issuer = $certificate.Issuer
+            NotBefore = $certificate.NotBefore
+            NotAfter = $certificate.NotAfter
+            IsSelfSigned = ($certificate.Subject -eq $certificate.Issuer)
+            IsCertificateAuthority = $isCa
+            DnsName = $(if ($dnsNames.Count) { $dnsNames[0] } else { '' })
+            DnsNames = @($dnsNames | Select-Object -Unique)
+            MetadataRead = $true
+            ParseWarning = ''
         }
-    }
-    catch {
-    }
-
-    $uniqueDnsNames = @(
-        $dnsNames |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-        ForEach-Object { $_.Trim().TrimEnd('.').ToLowerInvariant() } |
-        Select-Object -Unique
-    )
-
-    $dnsName = if ($uniqueDnsNames.Count -gt 0) {
-        [string]$uniqueDnsNames[0]
-    }
-    else {
-        ""
-    }
-
-    return [pscustomobject]@{
-        Pem = $normalizedPem
-        Count = $matches.Count
-        Subject = $certificate.Subject
-        Issuer = $certificate.Issuer
-        NotBefore = $certificate.NotBefore
-        NotAfter = $certificate.NotAfter
-        IsSelfSigned = ($certificate.Subject -eq $certificate.Issuer)
-        DnsName = $dnsName
-        DnsNames = $uniqueDnsNames
-        MetadataRead = $true
-        ParseWarning = ""
-    }
+    } finally { $certificate.Dispose() }
 }
 
 function Get-LikewebCertificateInformation {
@@ -852,75 +795,6 @@ function Get-LikewebCommentValue {
     return ""
 }
 
-function Get-LikewebTomlStringValue {
-    param(
-        [string]$Content,
-        [string]$Key
-    )
-
-    $escapedKey = [regex]::Escape($Key)
-    $match = [regex]::Match(
-        $Content,
-        '(?m)^\s*' + $escapedKey + '\s*=\s*"((?:\\.|[^"])*)"\s*$'
-    )
-
-    if ($match.Success) {
-        return ConvertFrom-LikewebTomlString $match.Groups[1].Value
-    }
-
-    return ""
-}
-
-function Get-LikewebAddressFromToml {
-    param([string]$Content)
-
-    $match = [regex]::Match(
-        $Content,
-        '(?m)^\s*addresses\s*=\s*\[\s*"((?:\\.|[^"])*)"'
-    )
-
-    if ($match.Success) {
-        return ConvertFrom-LikewebTomlString $match.Groups[1].Value
-    }
-
-    return ""
-}
-
-function Get-LikewebTomlBooleanValue {
-    param(
-        [string]$Content,
-        [string]$Key,
-        [bool]$Default = $false
-    )
-
-    $escapedKey = [regex]::Escape($Key)
-    $match = [regex]::Match(
-        $Content,
-        '(?m)^\s*' + $escapedKey + '\s*=\s*(true|false)\s*$'
-    )
-
-    if ($match.Success) {
-        return $match.Groups[1].Value -eq 'true'
-    }
-
-    return $Default
-}
-
-function Get-LikewebEmbeddedCertificate {
-    param([string]$Content)
-
-    $match = [regex]::Match(
-        $Content,
-        "(?s)certificate\s*=\s*'''\s*(.*?)\s*'''"
-    )
-
-    if ($match.Success) {
-        return $match.Groups[1].Value.Trim()
-    }
-
-    return ""
-}
-
 function Get-LikewebProfileInfo {
     param([string]$Path)
 
@@ -953,6 +827,10 @@ function Get-LikewebProfileInfo {
         $displayName = $id
     }
 
+    foreach ($key in @('hostname','username')) {
+        if (-not (Get-LikewebTomlStringValue $content $key)) { throw ('В профиле отсутствует поле ' + $key) }
+    }
+    if (-not (Get-LikewebAddressFromToml $content)) { throw 'В профиле отсутствует адрес сервера.' }
     $certificatePem = Get-LikewebEmbeddedCertificate $content
 
     return [pscustomobject][ordered]@{
@@ -967,6 +845,7 @@ function Get-LikewebProfileInfo {
         HasIPv6 = Get-LikewebTomlBooleanValue $content "has_ipv6" $true
         CertificatePem = $certificatePem
         EmbedCertificate = -not [string]::IsNullOrWhiteSpace($certificatePem)
+        Invalid = $false
         Path = $Path
     }
 }
@@ -981,6 +860,8 @@ function Get-LikewebProfiles {
             $profiles += Get-LikewebProfileInfo $file.FullName
         }
         catch {
+            Write-LikewebRuntimeError 'Read profile' $_
+            $profiles += [pscustomobject]@{ Id = $file.BaseName; DisplayName = $file.BaseName + ' (ошибка файла)'; Address = 'Не удалось прочитать профиль'; Path = $file.FullName; Invalid = $true }
         }
     }
 
@@ -989,26 +870,22 @@ function Get-LikewebProfiles {
 
 function Get-LikewebActiveProfileId {
     if (Test-Path -LiteralPath $script:LikewebActiveProfilePath) {
-        return ([System.IO.File]::ReadAllText($script:LikewebActiveProfilePath)).Trim()
+        try {
+            $id = ([IO.File]::ReadAllText($script:LikewebActiveProfilePath)).Trim()
+            if ($id -and $id -cne (ConvertTo-LikewebSafeId $id)) { throw 'Некорректный идентификатор активного профиля.' }
+            return $id
+        } catch { Write-LikewebRuntimeError 'Read active profile pointer' $_ }
     }
-
-    return ""
+    return ''
 }
 
 function Get-LikewebActiveProfileInfo {
     $id = Get-LikewebActiveProfileId
-
-    if ([string]::IsNullOrWhiteSpace($id)) {
-        return $null
-    }
-
-    $path = Join-Path $script:LikewebProfilesDir ($id + ".toml")
-
-    if (-not (Test-Path -LiteralPath $path)) {
-        return $null
-    }
-
-    return Get-LikewebProfileInfo $path
+    if (-not $id) { return $null }
+    $path = Join-Path $script:LikewebProfilesDir ($id + '.toml')
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try { return Get-LikewebProfileInfo $path }
+    catch { Write-LikewebRuntimeError 'Read active profile' $_; return $null }
 }
 
 function Backup-LikewebActiveConfig {
@@ -1016,7 +893,7 @@ function Backup-LikewebActiveConfig {
         return
     }
 
-    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
     $backupPath = Join-Path $script:LikewebBackupsDir (
         "lwtt_client." + $timestamp + ".toml"
     )
@@ -1031,24 +908,6 @@ function Backup-LikewebActiveConfig {
     if ($backups.Count -gt 10) {
         $backups | Select-Object -Skip 10 | Remove-Item -Force
     }
-}
-
-function Set-LikewebActiveProfile {
-    param([string]$ProfilePath)
-
-    if (-not (Test-Path -LiteralPath $ProfilePath)) {
-        throw "Файл профиля не найден."
-    }
-
-    Backup-LikewebActiveConfig
-    Copy-Item -LiteralPath $ProfilePath -Destination $script:LikewebActiveConfigPath -Force
-
-    $profileId = [System.IO.Path]::GetFileNameWithoutExtension($ProfilePath)
-    [System.IO.File]::WriteAllText(
-        $script:LikewebActiveProfilePath,
-        $profileId,
-        $script:LikewebUtf8NoBom
-    )
 }
 
 function Initialize-LikewebExistingProfile {
@@ -1111,84 +970,6 @@ function Initialize-LikewebExistingProfile {
         # Рабочая конфигурация не изменяется, если импорт не удался.
     }
 }
-
-function Get-LikewebProcess {
-    # First use the PID written by lwtt_runner.ps1. This works across
-    # the UAC boundary and prevents false "disconnected" states.
-    if (Test-Path -LiteralPath $script:LikewebVpnPidPath -PathType Leaf) {
-        try {
-            $pidText = ([System.IO.File]::ReadAllText(
-                $script:LikewebVpnPidPath
-            )).Trim()
-
-            $vpnPid = 0
-            if ([int]::TryParse($pidText, [ref]$vpnPid)) {
-                $pidProcess = Get-Process -Id $vpnPid -ErrorAction SilentlyContinue
-                if ($null -ne $pidProcess -and $pidProcess.ProcessName -eq "trusttunnel_client") {
-                    return $pidProcess
-                }
-            }
-        }
-        catch {
-        }
-
-        try {
-            Remove-Item -LiteralPath $script:LikewebVpnPidPath -Force -ErrorAction SilentlyContinue
-        }
-        catch {
-        }
-    }
-
-    $processes = @(
-        Get-Process -Name "trusttunnel_client" -ErrorAction SilentlyContinue
-    )
-
-    if ($processes.Count -eq 0) {
-        return $null
-    }
-
-    $fallback = New-Object System.Collections.Generic.List[object]
-
-    foreach ($process in $processes) {
-        try {
-            if (
-                $process.Path -and
-                ([System.IO.Path]::GetFullPath($process.Path) -ieq
-                 [System.IO.Path]::GetFullPath($script:LikewebExePath))
-            ) {
-                return $process
-            }
-        }
-        catch {
-            # A normal-integrity UI cannot always read Path from an elevated
-            # TrustTunnel process. Keep it as a fallback candidate.
-        }
-
-        $fallback.Add($process)
-    }
-
-    try {
-        $cimProcesses = @(
-            Get-CimInstance Win32_Process -Filter "Name='trusttunnel_client.exe'" -ErrorAction Stop
-        )
-
-        foreach ($cimProcess in $cimProcesses) {
-            if (
-                -not [string]::IsNullOrWhiteSpace([string]$cimProcess.ExecutablePath) -and
-                ([System.IO.Path]::GetFullPath([string]$cimProcess.ExecutablePath) -ieq
-                 [System.IO.Path]::GetFullPath($script:LikewebExePath))
-            ) {
-                return Get-Process -Id ([int]$cimProcess.ProcessId) -ErrorAction SilentlyContinue
-            }
-        }
-    }
-    catch {
-    }
-
-    # LW TrustTunnel Client intentionally runs a single TrustTunnel client.
-    return $fallback[0]
-}
-
 
 function Read-LikewebSharedText {
     param([string]$Path)
@@ -1296,70 +1077,8 @@ function Get-LikewebLatestVpnLogText {
 
 
 
-function Set-LikewebOperationState {
-    param(
-        [ValidateSet("Idle", "Connecting", "Disconnecting")]
-        [string]$State,
-        [string]$ProfileId = "",
-        [string]$DisplayName = ""
-    )
-
-    try {
-        if ($State -eq "Idle") {
-            if (Test-Path -LiteralPath $script:LikewebOperationStatePath -PathType Leaf) {
-                Remove-Item -LiteralPath $script:LikewebOperationStatePath -Force -ErrorAction SilentlyContinue
-            }
-            return
-        }
-
-        $payload = [pscustomobject][ordered]@{
-            State = $State
-            ProfileId = $ProfileId
-            DisplayName = $DisplayName
-            UpdatedAt = (Get-Date).ToString("o")
-            Pid = $PID
-        }
-
-        $json = $payload | ConvertTo-Json -Compress
-        [System.IO.File]::WriteAllText($script:LikewebOperationStatePath, $json, $script:LikewebUtf8NoBom)
-    }
-    catch {
-    }
-}
-
 function Clear-LikewebOperationState {
     Set-LikewebOperationState "Idle"
-}
-
-function Get-LikewebOperationState {
-    try {
-        if (-not (Test-Path -LiteralPath $script:LikewebOperationStatePath -PathType Leaf)) {
-            return $null
-        }
-
-        $json = [System.IO.File]::ReadAllText($script:LikewebOperationStatePath)
-        if ([string]::IsNullOrWhiteSpace($json)) {
-            return $null
-        }
-
-        $state = $json | ConvertFrom-Json
-        $updatedAt = [datetime]::MinValue
-        if (-not [datetime]::TryParse([string]$state.UpdatedAt, [ref]$updatedAt)) {
-            return $null
-        }
-
-        # Treat stale operation markers as a completed operation. This keeps the
-        # tray from getting stuck in a busy state if another process exits early.
-        if (((Get-Date) - $updatedAt).TotalSeconds -gt 90) {
-            Clear-LikewebOperationState
-            return $null
-        }
-
-        return $state
-    }
-    catch {
-        return $null
-    }
 }
 
 function New-LikewebDiagnosticLogContent {
@@ -1431,90 +1150,7 @@ function New-LikewebDiagnosticLogContent {
         $lines.Add("The manager log does not exist.")
     }
 
-    return ($lines -join "`r`n")
-}
-
-function Close-LikewebServerManagerWindows {
-    $ids = New-Object System.Collections.Generic.HashSet[int]
-
-    if (Test-Path -LiteralPath $script:LikewebManagerPidPath -PathType Leaf) {
-        try {
-            $managerPidText = ([System.IO.File]::ReadAllText(
-                $script:LikewebManagerPidPath
-            )).Trim()
-            $managerPid = 0
-            if ([int]::TryParse($managerPidText, [ref]$managerPid)) {
-                [void]$ids.Add($managerPid)
-            }
-        }
-        catch {
-        }
-    }
-
-    try {
-        $escapedScript = [Regex]::Escape($script:LikewebBaseDir + "\lwtt_manager.ps1")
-        $managerProcesses = Get-CimInstance Win32_Process `
-            -Filter "Name='powershell.exe'" `
-            -ErrorAction SilentlyContinue
-
-        foreach ($process in $managerProcesses) {
-            $commandLine = [string]$process.CommandLine
-            if (
-                -not [string]::IsNullOrWhiteSpace($commandLine) -and
-                $commandLine -match $escapedScript
-            ) {
-                [void]$ids.Add([int]$process.ProcessId)
-            }
-        }
-    }
-    catch {
-    }
-
-    foreach ($managerPid in $ids) {
-        if ($managerPid -eq $PID) {
-            continue
-        }
-
-        try {
-            Stop-Process -Id $managerPid -Force -ErrorAction SilentlyContinue
-        }
-        catch {
-        }
-    }
-
-    $remainingIds = @(
-        $ids | Where-Object {
-            $_ -ne $PID -and
-            $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue)
-        }
-    )
-
-    if ($remainingIds.Count -gt 0) {
-        try {
-            $taskkillArguments = New-Object System.Collections.Generic.List[string]
-            foreach ($remainingId in $remainingIds) {
-                $taskkillArguments.Add("/PID")
-                $taskkillArguments.Add([string]$remainingId)
-            }
-            $taskkillArguments.Add("/T")
-            $taskkillArguments.Add("/F")
-
-            Start-Process `
-                -FilePath "taskkill.exe" `
-                -Verb RunAs `
-                -ArgumentList $taskkillArguments.ToArray() `
-                -WindowStyle Hidden `
-                -Wait
-        }
-        catch {
-        }
-    }
-
-    try {
-        Remove-Item -LiteralPath $script:LikewebManagerPidPath -Force -ErrorAction SilentlyContinue
-    }
-    catch {
-    }
+    return Protect-LikewebDiagnosticText ($lines -join "`r`n")
 }
 
 function Invoke-LikewebHiddenBatch {
@@ -1533,141 +1169,9 @@ function Invoke-LikewebHiddenBatch {
     [System.Diagnostics.Process]::Start($startInfo) | Out-Null
 }
 
-function Stop-LikewebVpnAndWait {
-    if (-not (Get-LikewebProcess)) {
-        return $true
-    }
 
-    try {
-        Invoke-LikewebHiddenBatch $script:LikewebStopBatPath
-    }
-    catch {
-    }
-
-    for ($i = 0; $i -lt 60; $i++) {
-        Start-Sleep -Milliseconds 250
-        try { [System.Windows.Forms.Application]::DoEvents() } catch {}
-
-        if (-not (Get-LikewebProcess)) {
-            return $true
-        }
-    }
-
-    $process = Get-LikewebProcess
-    if ($process) {
-        try {
-            Stop-Process -Id $process.Id -Force -ErrorAction Stop
-            Start-Sleep -Milliseconds 500
-        }
-        catch {
-            return $false
-        }
-    }
-
-    return $null -eq (Get-LikewebProcess)
-}
-
-function Start-LikewebVpnAndWait {
-    try {
-        Invoke-LikewebHiddenBatch $script:LikewebStartBatPath
-    }
-    catch {
-        return $false
-    }
-
-    $appeared = $false
-
-    for ($i = 0; $i -lt 120; $i++) {
-        Start-Sleep -Milliseconds 250
-        try { [System.Windows.Forms.Application]::DoEvents() } catch {}
-
-        if (Get-LikewebProcess) {
-            $appeared = $true
-            break
-        }
-    }
-
-    if (-not $appeared) {
-        return $false
-    }
-
-    for ($i = 0; $i -lt 32; $i++) {
-        Start-Sleep -Milliseconds 250
-        try { [System.Windows.Forms.Application]::DoEvents() } catch {}
-
-        if (-not (Get-LikewebProcess)) {
-            return $false
-        }
-    }
-
-    return $true
-}
-
-function Test-LikewebConfiguration {
-    param([string]$TomlContent)
-
-    $hadActiveConfig = Test-Path -LiteralPath $script:LikewebActiveConfigPath
-    $activeConfigBytes = $null
-    $hadActiveProfileFile = Test-Path -LiteralPath $script:LikewebActiveProfilePath
-    $activeProfileText = ""
-    $wasRunning = $null -ne (Get-LikewebProcess)
-
-    if ($hadActiveConfig) {
-        $activeConfigBytes = [System.IO.File]::ReadAllBytes($script:LikewebActiveConfigPath)
-    }
-
-    if ($hadActiveProfileFile) {
-        $activeProfileText = [System.IO.File]::ReadAllText($script:LikewebActiveProfilePath)
-    }
-
-    $testSucceeded = $false
-    $restoreSucceeded = $true
-
-    try {
-        [void](Stop-LikewebVpnAndWait)
-        [System.IO.File]::WriteAllText(
-            $script:LikewebActiveConfigPath,
-            $TomlContent,
-            $script:LikewebUtf8NoBom
-        )
-
-        $testSucceeded = Start-LikewebVpnAndWait
-        [void](Stop-LikewebVpnAndWait)
-    }
-    finally {
-        try {
-            if ($hadActiveConfig) {
-                [System.IO.File]::WriteAllBytes(
-                    $script:LikewebActiveConfigPath,
-                    $activeConfigBytes
-                )
-            }
-            elseif (Test-Path -LiteralPath $script:LikewebActiveConfigPath) {
-                Remove-Item -LiteralPath $script:LikewebActiveConfigPath -Force
-            }
-
-            if ($hadActiveProfileFile) {
-                [System.IO.File]::WriteAllText(
-                    $script:LikewebActiveProfilePath,
-                    $activeProfileText,
-                    $script:LikewebUtf8NoBom
-                )
-            }
-            elseif (Test-Path -LiteralPath $script:LikewebActiveProfilePath) {
-                Remove-Item -LiteralPath $script:LikewebActiveProfilePath -Force
-            }
-
-            if ($wasRunning -and $hadActiveConfig) {
-                $restoreSucceeded = Start-LikewebVpnAndWait
-            }
-        }
-        catch {
-            $restoreSucceeded = $false
-        }
-    }
-
-    return [pscustomobject]@{
-        Success = $testSucceeded
-        PreviousConnectionRestored = $restoreSucceeded
-    }
-}
+# Keep the public helper names while separating persistence, configuration and process control.
+. (Join-Path $PSScriptRoot 'lwtt_storage.ps1')
+. (Join-Path $PSScriptRoot 'lwtt_configuration.ps1')
+. (Join-Path $PSScriptRoot 'lwtt_connection.ps1')
+. (Join-Path $PSScriptRoot 'lwtt_manager_ipc.ps1')

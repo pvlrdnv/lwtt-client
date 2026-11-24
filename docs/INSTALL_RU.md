@@ -1,6 +1,6 @@
 # Установка LW TrustTunnel Client на Windows
 
-Эта инструкция специально начинается с установки основного клиента TrustTunnel. LW TrustTunnel Client — это оболочка управления, а не замена `trusttunnel_client.exe`.
+Готовый bundle-архив уже содержит движок TrustTunnel и файлы приложения. Для него достаточно распаковать архив и перейти к первому запуску. Шаги установки движка ниже нужны при ручной сборке папки приложения.
 
 ## 1. Сначала установите клиент TrustTunnel
 
@@ -12,9 +12,9 @@
 
 Выберите архив TrustTunnel для Windows:
 
-- `trusttunnel_client-v1.0.31-windows-x86_64.zip` — для большинства современных компьютеров с 64-разрядной Windows;
-- `trusttunnel_client-v1.0.31-windows-i686.zip` — для 32-разрядной Windows;
-- `trusttunnel_client-v1.0.31-windows-aarch64.zip` — для устройств на ARM-процессоре.
+- `trusttunnel_client-v1.0.49-windows-x86_64.zip` – для большинства современных компьютеров с 64-разрядной Windows;
+- `trusttunnel_client-v1.0.49-windows-i686.zip` – для 32-разрядной Windows;
+- `trusttunnel_client-v1.0.49-windows-aarch64.zip` – для устройств на ARM-процессоре.
 
 Для обычного современного ноутбука или ПК с Windows 10/11 чаще всего нужен вариант `x86_64`.
 
@@ -29,7 +29,7 @@ C:\Trusttunnel
 Можно использовать и другой путь, например:
 
 ```text
-C:\Portable	rusttunnel-manager
+C:\Portable\trusttunnel-manager
 ```
 
 Важно: в корне выбранной папки должен лежать основной файл запуска `lwtt_tray_start.bat`. Все технические файлы приложения находятся во вложенной папке `lwtt_app`.
@@ -63,7 +63,7 @@ WINTUN_LICENSE.txt
 
 Если вы используете готовый bundle-архив, просто распакуйте его в `C:\Trusttunnel`.
 
-Если вы собираете папку вручную, скопируйте файлы из `app/` так, чтобы структура была такой:
+Если вы собираете папку вручную, скопируйте всю папку `app/`, включая все PowerShell-модули. Дополнительно скопируйте корневой `VERSION` в `lwtt_app/VERSION`. Основные файлы будут расположены так:
 
 ```text
 C:\Trusttunnel\lwtt_tray_start.bat
@@ -76,10 +76,11 @@ C:\Trusttunnel\lwtt_app\trusttunnel_client.exe
 C:\Trusttunnel\lwtt_app\wintun.dll
 ```
 
-В корне папки `C:\Trusttunnel` для пользователя должен быть только основной файл запуска:
+В корне папки `C:\Trusttunnel` находятся файл запуска и краткая инструкция:
 
 ```text
 lwtt_tray_start.bat
+ИНСТРУКЦИЯ БЫСТРОГО СТАРТА.txt
 ```
 
 ## 5. Первый запуск
@@ -109,21 +110,18 @@ Windows может запросить права администратора. �
 Чтобы запускать клиент автоматически при входе в Windows, запустите:
 
 ```text
-lwtt_autostart_install.bat
+lwtt_app\lwtt_autostart_install.bat
 ```
 
 Чтобы удалить автозапуск:
 
 ```text
-lwtt_autostart_remove.bat
+lwtt_app\lwtt_autostart_remove.bat
 ```
 
 ## 8. Обновление
 
-1. Закройте приложение через меню трея.
-2. Скопируйте новые файлы LWTT поверх старых.
-3. Не удаляйте папку `lwtt_app\profiles`, если хотите сохранить свои серверы.
-4. Запустите `lwtt_tray_start.bat`.
+Следуйте [инструкции обновления](MIGRATION_RU.md). Перед заменой файлов закройте приложение и сохраните резервную копию папки установки. Сохраняйте `lwtt_app/profiles` и `lwtt_app/settings`; незавершённые операции сначала восстановите в старой установке.
 
 ## 9. Что не нужно переименовывать
 

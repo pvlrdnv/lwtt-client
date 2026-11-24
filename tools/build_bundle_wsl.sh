@@ -40,7 +40,6 @@ need_cmd() {
 
 need_cmd curl
 need_cmd unzip
-need_cmd zip
 need_cmd python3
 
 if [[ ! -d "$APP_DIR" ]]; then
@@ -69,12 +68,30 @@ if [[ -z "$LWTT_VERSION" ]]; then
   LWTT_VERSION="dev"
 fi
 
-rm -rf "$WORK_DIR"
+mkdir -p "$WORK_DIR"
+WORK_DIR="$(mktemp -d "$WORK_DIR/build.XXXXXX")"
+trap 'rm -rf "$WORK_DIR"' EXIT
 mkdir -p "$WORK_DIR/download" "$WORK_DIR/extract" "$WORK_DIR/out" "$DIST_DIR"
 
 RELEASE_JSON="$WORK_DIR/release.json"
-echo "Downloading latest TrustTunnelClient release metadata..."
-curl -fsSL "https://api.github.com/repos/TrustTunnel/TrustTunnelClient/releases/latest" -o "$RELEASE_JSON"
+LOCK_FILE="$SCRIPT_DIR/trusttunnel-release.json"
+TT_VERSION="${2:-$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$LOCK_FILE")}"
+EXPECTED_SHA="$(python3 - "$LOCK_FILE" "$TT_VERSION" "$ARCH" <<'PY_LOCK'
+import json,sys
+lock=json.load(open(sys.argv[1]))
+if sys.argv[2] != lock['version']:
+    raise SystemExit('Update tools/trusttunnel-release.json before changing the engine version')
+print(lock['sha256'][sys.argv[3]])
+PY_LOCK
+)"
+if [[ -n "${LWTT_TRUSTTUNNEL_ZIP:-}" ]]; then
+  ASSET_NAME="trusttunnel_client-${TT_VERSION}-windows-${ARCH}.zip"
+  TT_TAG="$TT_VERSION"
+  ASSET_PATH="$WORK_DIR/download/$ASSET_NAME"
+  cp "$LWTT_TRUSTTUNNEL_ZIP" "$ASSET_PATH"
+else
+  echo "Downloading TrustTunnelClient $TT_VERSION release metadata..."
+curl -fsSL "https://api.github.com/repos/TrustTunnel/TrustTunnelClient/releases/tags/$TT_VERSION" -o "$RELEASE_JSON"
 
 eval "$(python3 - "$RELEASE_JSON" "$ARCH" <<'PY_EVAL'
 import json
@@ -105,11 +122,18 @@ print(f"ASSET_URL={shlex.quote(match['browser_download_url'])}")
 PY_EVAL
 )"
 
+[[ "$TT_TAG" == "$TT_VERSION" ]] || { echo "Unexpected release tag" >&2; exit 1; }
 echo "TrustTunnelClient release: $TT_TAG"
 echo "Selected asset: $ASSET_NAME"
 
 ASSET_PATH="$WORK_DIR/download/$ASSET_NAME"
 curl -fL "$ASSET_URL" -o "$ASSET_PATH"
+fi
+ACTUAL_SHA="$(sha256sum "$ASSET_PATH" | cut -d ' ' -f 1)"
+if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
+  echo "TrustTunnel SHA256 mismatch; refusing to package." >&2
+  exit 1
+fi
 
 unzip -q "$ASSET_PATH" -d "$WORK_DIR/extract"
 
@@ -125,7 +149,16 @@ RUNTIME_DIR="$BUNDLE_DIR/lwtt_app"
 mkdir -p "$RUNTIME_DIR"
 
 # Copy LWTT files first: root receives only user-facing files; runtime receives technical files.
-cp -a "$APP_DIR/." "$BUNDLE_DIR/"
+cp "$APP_DIR/lwtt_tray_start.bat" "$BUNDLE_DIR/"
+while IFS= read -r runtime_file; do
+  runtime_file="${runtime_file%$'\r'}"
+  [[ -z "$runtime_file" || "$runtime_file" == "VERSION" ]] && continue
+  cp "$APP_DIR/lwtt_app/$runtime_file" "$RUNTIME_DIR/"
+done < "$SCRIPT_DIR/runtime-files.txt"
+for runtime_doc in README_LWTT_CLIENT.txt ИЗМЕНЕНИЯ_V4.15.txt; do
+  [[ ! -f "$APP_DIR/lwtt_app/$runtime_doc" ]] || cp "$APP_DIR/lwtt_app/$runtime_doc" "$RUNTIME_DIR/"
+done
+cp "$REPO_ROOT/VERSION" "$RUNTIME_DIR/VERSION"
 
 # Copy TrustTunnel files into technical runtime folder, not into ZIP root.
 cp -a "$TRUST_DIR/." "$RUNTIME_DIR/"
@@ -148,9 +181,13 @@ INFO
 # Safety cleanup: never include local user data in a public bundle.
 rm -rf "$RUNTIME_DIR/profiles" \
        "$RUNTIME_DIR/log" \
+       "$RUNTIME_DIR/settings" \
        "$RUNTIME_DIR/.bundle_work" \
        "$RUNTIME_DIR/profiles_backup" 2>/dev/null || true
 find "$BUNDLE_DIR" -type f \( \
+  -iname '*.tmp' -o \
+  -iname '*.bak' -o \
+  -iname '*.log' -o \
   -iname '*.pem' -o \
   -iname '*diagnostic*.txt' -o \
   -iname '*.pid' -o \
@@ -162,6 +199,12 @@ if [[ ! -f "$BUNDLE_DIR/lwtt_tray_start.bat" || ! -f "$BUNDLE_DIR/$QUICK_START_N
   echo "Bundle validation failed: required files are missing." >&2
   exit 1
 fi
+
+while IFS= read -r required; do
+  required="${required%$'\r'}"
+  [[ -z "$required" ]] && continue
+  [[ -f "$RUNTIME_DIR/$required" ]] || { echo "Missing runtime file: $required" >&2; exit 1; }
+done < "$SCRIPT_DIR/runtime-files.txt"
 
 # Keep ZIP root clean: user-facing files stay in root; all technical files are in lwtt_app/.
 for item in "$BUNDLE_DIR"/*; do
@@ -179,10 +222,16 @@ VERSIONED_ZIP="$DIST_DIR/$VERSIONED_NAME"
 LATEST_ZIP="$DIST_DIR/$LATEST_NAME"
 
 rm -f "$VERSIONED_ZIP" "$LATEST_ZIP" "$VERSIONED_ZIP.sha256" "$LATEST_ZIP.sha256"
-(
-  cd "$BUNDLE_DIR"
-  zip -qr "$VERSIONED_ZIP" .
-)
+# Python writes UTF-8 filename flags so Windows preserves the Russian guide name.
+python3 - "$BUNDLE_DIR" "$VERSIONED_ZIP" <<'PY_ZIP'
+from pathlib import Path
+import sys, zipfile
+source = Path(sys.argv[1])
+with zipfile.ZipFile(sys.argv[2], 'w', zipfile.ZIP_DEFLATED) as archive:
+    for file in sorted(source.rglob('*')):
+        if file.is_file():
+            archive.write(file, file.relative_to(source).as_posix())
+PY_ZIP
 cp "$VERSIONED_ZIP" "$LATEST_ZIP"
 
 (

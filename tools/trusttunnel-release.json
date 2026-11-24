@@ -1,0 +1,8 @@
+{
+  "version": "v1.0.49",
+  "sha256": {
+    "x86_64": "0e11150e77c083c828593e6fab7f76a159dd55b9ad9101dd70c4568da3cdf11b",
+    "i686": "09f3d087e10fb7cb1694c26417369c9a3bbb4e42b8b545b6444e52bba7ea3932",
+    "aarch64": "b4fdf118be09a48a515a6f33c3b6462d0f6416076f5d4a4cf2d309a2ea3e3eb6"
+  }
+}

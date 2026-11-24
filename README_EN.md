@@ -45,17 +45,25 @@ lwtt_app\
 
 ## Repository contents
 
-- `app/` — LW TrustTunnel Client files in bundle-ready structure.
-- `docs/QUICK_START_RU.md` — short user guide in Russian.
-- `docs/INSTALL_RU.md` — detailed Russian installation guide.
-- `docs/USAGE_RU.md` — usage guide in Russian.
-- `docs/SERVER_PROFILES_RU.md` — server profile format and import notes.
-- `docs/TROUBLESHOOTING_RU.md` — troubleshooting guide.
-- `docs/SECURITY_RU.md` — privacy and security notes.
-- `docs/BUNDLE_WSL_RU.md` — instructions for building the ready-to-run bundle in VS Code WSL.
-- `dist/LWTT_Client_Manager_v4_16_public.zip` — public package with the LWTT wrapper only, without user profiles.
-- `tools/build_bundle_wsl.sh` — WSL builder for the ready-to-run Windows x86_64 archive.
+- `app/` – LW TrustTunnel Client files in bundle-ready structure.
+- `docs/QUICK_START_RU.md` – short user guide in Russian.
+- `docs/INSTALL_RU.md` – detailed Russian installation guide.
+- `docs/USAGE_RU.md` – usage guide in Russian.
+- `docs/SERVER_PROFILES_RU.md` – server profile format and import notes.
+- `docs/TROUBLESHOOTING_RU.md` – troubleshooting guide.
+- `docs/SECURITY_RU.md` – privacy and security notes.
+- `docs/BUNDLE_WSL_RU.md` – instructions for building the ready-to-run bundle in VS Code WSL.
+- `dist/LWTT_Client_Manager_v4_19_public.zip` – public package with the LWTT wrapper only, without user profiles.
+- `tools/build_bundle_wsl.sh` – WSL builder for the ready-to-run Windows x86_64 archive.
 
 ## License
 
 See [LICENSE](LICENSE). No open-source license has been selected for this project yet. All rights are reserved by the repository owner.
+
+## Version 4.17
+
+The tray now includes a shared bypass list. Server edits preserve additional TOML settings. Background connection operations use a shared lock, cancellation and recovery journals. Both builders pin TrustTunnel v1.0.49 and verify its SHA256. Run `tests/run.ps1` and `tests/interface.ps1` in Windows PowerShell 5.1 for isolated checks. Actual VPN traffic and DPI behavior require a separate Windows smoke test.
+
+## Version 4.18
+
+PEM upload is optional. The default uses Windows certificate trust with verification enabled. The collapsed certificate section is available when adding or editing a server and supports replacement and removal. Certificate trust errors include a suitable upload action; timeout, DNS and authentication failures are not reported as a missing PEM.

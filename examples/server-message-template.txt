@@ -1,4 +1,4 @@
-Название сервера (username) — ручной ввод
+Название сервера (username) – ручной ввод
 
 Server name
 server_internal_name
@@ -22,4 +22,4 @@ Allow IPv6 connections via the server
 Yes
 
 Self-signed certificate
-Custom certificate included — импортируйте файл .pem из следующего сообщения.
+Custom certificate included – импортируйте файл .pem из следующего сообщения.

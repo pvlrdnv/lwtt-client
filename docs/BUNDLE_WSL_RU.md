@@ -23,7 +23,7 @@ code .
 
 ```bash
 sudo apt update
-sudo apt install -y curl unzip zip python3 ca-certificates
+sudo apt install -y curl unzip python3 ca-certificates
 ```
 
 ## 3. Соберите архив по умолчанию
@@ -41,7 +41,7 @@ chmod +x build_bundle_wsl.sh tools/build_bundle_wsl.sh
 ./tools/build_bundle_wsl.sh x86_64
 ```
 
-Скрипт сам скачает последний TrustTunnelClient со страницы релизов GitHub, выберет asset `windows-x86_64`, добавит файлы LW TrustTunnel Client и создаст архив в папке `dist`. В корне ZIP будет только `lwtt_tray_start.bat`, а все технические файлы будут во вложенной папке `lwtt_app/`.
+Скрипт скачает закреплённый в `tools/trusttunnel-release.json` релиз TrustTunnel, проверит SHA256, добавит файлы приложения и создаст ZIP в `dist`. В корне ZIP находятся `lwtt_tray_start.bat` и краткая инструкция; технические файлы находятся в `lwtt_app/`.
 
 ## 4. Результат сборки
 
@@ -50,8 +50,8 @@ chmod +x build_bundle_wsl.sh tools/build_bundle_wsl.sh
 ```text
 LWTT_Client_Bundle_windows_x86_64.zip
 LWTT_Client_Bundle_windows_x86_64.zip.sha256
-LWTT_Client_Bundle_v4.16_trusttunnel_v..._windows_x86_64.zip
-LWTT_Client_Bundle_v4.16_trusttunnel_v..._windows_x86_64.zip.sha256
+LWTT_Client_Bundle_v4.19_trusttunnel_v..._windows_x86_64.zip
+LWTT_Client_Bundle_v4.19_trusttunnel_v..._windows_x86_64.zip.sha256
 ```
 
 Главная стабильная ссылка для README:
@@ -84,7 +84,7 @@ git add README.md tools/build_bundle_wsl.sh build_bundle_wsl.sh docs/BUNDLE_WSL_
   dist/LWTT_Client_Bundle_windows_x86_64.zip \
   dist/LWTT_Client_Bundle_windows_x86_64.zip.sha256
 
-git commit -m "Build LWTT bundle v4.15 for windows_x86_64"
+git commit -m "Build LWTT bundle v4.19 for windows_x86_64"
 git push origin main
 ```
 
@@ -100,3 +100,13 @@ git push origin main
 ```
 
 Но по умолчанию для обычных пользователей используется `x86_64`.
+
+## Закреплённая версия и сборка без сети
+
+Движок закреплён на v1.0.49 в `tools/trusttunnel-release.json`; SHA256 скачанного архива проверяется до распаковки. Для обновления движка отдельно обновите этот файл и проверьте совместимость.
+
+```bash
+LWTT_TRUSTTUNNEL_ZIP=/path/to/trusttunnel_client-v1.0.49-windows-x86_64.zip ./build_bundle_wsl.sh
+```
+
+Этот режим использует уже скачанный архив и также проверяет SHA256.

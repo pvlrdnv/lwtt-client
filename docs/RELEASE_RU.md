@@ -1,46 +1,11 @@
-# Публичная сборка
+# Сборка LW TrustTunnel Client 4.19
 
-Текущая публичная сборка:
+Основной архив: `dist/LWTT_Client_Bundle_windows_x86_64.zip`. Версионный архив: `dist/LWTT_Client_Bundle_v4.19_trusttunnel_v1.0.49_windows_x86_64.zip`.
 
-```text
-LWTT_Client_Manager_v4_15_public.zip
-```
+Для установки распакуйте архив и запустите `lwtt_tray_start.bat`. В корне также находится краткая инструкция; технические файлы размещены в `lwtt_app`.
 
-Она находится в папке:
+Версия оболочки берётся из `VERSION`, версия движка и проверяемые SHA256 из `tools/trusttunnel-release.json`. Оба сборщика используют `tools/runtime-files.txt` для проверки обязательных файлов.
 
-```text
-dist/
-```
+Архив только с оболочкой: `dist/LWTT_Client_Manager_v4_19_public.zip`. Он требует отдельно добавить `trusttunnel_client.exe` и `wintun.dll` в `lwtt_app`.
 
-Архив содержит только файлы приложения и не содержит пользовательских данных.
-
-## Состав приложения
-
-```text
-lwtt_tray_start.bat
-lwtt_tray.ps1
-lwtt_manager.ps1
-lwtt_manager_start.bat
-lwtt_common.ps1
-lwtt_start.bat
-lwtt_stop.bat
-lwtt_runner.ps1
-lwtt_test_worker.ps1
-lwtt_autostart_install.bat
-lwtt_autostart_remove.bat
-icons8-start-96.ico
-icons8-stop2-96.ico
-icons8-waiting-96.ico
-```
-
-## Проверка перед публикацией
-
-Перед публикацией убедитесь, что в архиве нет:
-
-```text
-profiles/
-*.pem
-*.toml
-log/
-*_diagnostic_*.txt
-```
+Публичные архивы исключают профили, сертификаты пользователей, настройки обхода, активную конфигурацию и журналы. Перед выпуском обязательны проверки `tests/run.ps1`, `tests/interface.ps1`, целостности ZIP, контрольных сумм и совпадения скриптов с исходниками. Для проверки реального подключения, маршрутов, UAC и DPI нужен отдельный запуск на Windows; изолированные тесты не заменяют его.

@@ -47,7 +47,8 @@ if (Test-Path -LiteralPath $PidPath -PathType Leaf) {
             $existingProcess = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
             if (
                 $null -ne $existingProcess -and
-                $existingProcess.ProcessName -eq "trusttunnel_client"
+                $existingProcess.ProcessName -eq "trusttunnel_client" -and
+                $existingProcess.Path -ieq $ExePath
             ) {
                 exit 0
             }
@@ -59,6 +60,12 @@ if (Test-Path -LiteralPath $PidPath -PathType Leaf) {
     Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
 }
 
+# Keep the latest twenty completed sessions. Current session has not started yet.
+$oldLogs = @(Get-ChildItem -LiteralPath $LogDir -Filter 'trusttunnel_*.meta.txt' -File | Sort-Object LastWriteTime -Descending | Select-Object -Skip 19)
+foreach ($oldLog in $oldLogs) {
+    $prefix = $oldLog.FullName.Substring(0, $oldLog.FullName.Length - '.meta.txt'.Length)
+    foreach ($suffix in @('.meta.txt','.out.log','.err.log')) { Remove-Item -LiteralPath ($prefix + $suffix) -Force -ErrorAction SilentlyContinue }
+}
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
 $randomPart = Get-Random -Minimum 1000 -Maximum 9999
 $baseLogPath = Join-Path $LogDir ("trusttunnel_{0}_{1}" -f $stamp, $randomPart)

@@ -1,8 +1,12 @@
-param(
+﻿param(
     [ValidateSet('x86_64','i686','aarch64')]
     [string]$Architecture = 'x86_64',
 
     [string]$OutDir = '',
+
+    [string]$TrustTunnelVersion = '',
+
+    [string]$TrustTunnelZipPath = '',
 
     [switch]$KeepWorkDir
 )
@@ -59,8 +63,19 @@ $BundleRuntimeDir = Join-Path $BundleRoot 'lwtt_app'
 New-Item -ItemType Directory -Force -Path $DownloadDir, $ExtractDir, $BundleRoot, $BundleRuntimeDir | Out-Null
 
 try {
-    Write-Step 'Reading latest TrustTunnelClient release from GitHub'
-    $ReleaseApi = 'https://api.github.com/repos/TrustTunnel/TrustTunnelClient/releases/latest'
+    $ReleaseLock = Get-Content -LiteralPath (Join-Path $ScriptRoot 'trusttunnel-release.json') -Raw | ConvertFrom-Json
+    if (-not $TrustTunnelVersion) { $TrustTunnelVersion = $ReleaseLock.version }
+    if ($TrustTunnelVersion -ne $ReleaseLock.version) { throw 'Update tools/trusttunnel-release.json before changing the engine version.' }
+    $ExpectedSha = [string]$ReleaseLock.sha256.$Architecture
+    Write-Step ('Reading TrustTunnelClient ' + $TrustTunnelVersion)
+    $ReleaseApi = 'https://api.github.com/repos/TrustTunnel/TrustTunnelClient/releases/tags/' + [Uri]::EscapeDataString($TrustTunnelVersion)
+    if ($TrustTunnelZipPath) {
+        $TrustTunnelTag = $TrustTunnelVersion
+        $Asset = [pscustomobject]@{ name = "trusttunnel_client-$TrustTunnelVersion-windows-$Architecture.zip" }
+        $TrustTunnelZip = Join-Path $DownloadDir $Asset.name
+        Copy-Item -LiteralPath $TrustTunnelZipPath -Destination $TrustTunnelZip
+    }
+    else {
     $Headers = @{ 'User-Agent' = 'LWTT-Client-Bundle-Builder' }
     $Release = Invoke-RestMethod -Uri $ReleaseApi -Headers $Headers
     $TrustTunnelTag = [string]$Release.tag_name
@@ -77,6 +92,9 @@ try {
     Write-Host "TrustTunnelClient release: $TrustTunnelTag"
     Write-Host "Selected asset: $($Asset.name)"
     Invoke-WebRequest -Uri $Asset.browser_download_url -OutFile $TrustTunnelZip -Headers $Headers
+    }
+    if ($TrustTunnelTag -ne $TrustTunnelVersion) { throw 'Unexpected release tag.' }
+    if ((Get-FileHash -LiteralPath $TrustTunnelZip -Algorithm SHA256).Hash -ine $ExpectedSha) { throw 'TrustTunnel SHA256 mismatch.' }
     Expand-Archive -LiteralPath $TrustTunnelZip -DestinationPath $ExtractDir -Force
 
     $TrustTunnelExe = Get-ChildItem -LiteralPath $ExtractDir -Recurse -File -Filter 'trusttunnel_client.exe' | Select-Object -First 1
@@ -85,13 +103,22 @@ try {
     $WintunDll = Get-ChildItem -LiteralPath $TrustTunnelRoot -Recurse -File -Filter 'wintun.dll' | Select-Object -First 1
     if (-not $WintunDll) { throw 'Downloaded TrustTunnelClient archive does not contain wintun.dll.' }
 
-    Copy-Item -LiteralPath (Join-Path $AppDir '*') -Destination $BundleRoot -Recurse -Force
-    Copy-Item -LiteralPath (Join-Path $TrustTunnelRoot '*') -Destination $BundleRuntimeDir -Recurse -Force
+    Copy-Item -LiteralPath (Join-Path $AppDir 'lwtt_tray_start.bat') -Destination $BundleRoot
+    foreach ($RuntimeFile in (Get-Content -LiteralPath (Join-Path $ScriptRoot 'runtime-files.txt'))) {
+        if ($RuntimeFile.Trim() -and $RuntimeFile -ne 'VERSION') { Copy-Item -LiteralPath (Join-Path $RuntimeAppDir $RuntimeFile.Trim()) -Destination $BundleRuntimeDir }
+    }
+    foreach ($RuntimeDoc in @('README_LWTT_CLIENT.txt','ИЗМЕНЕНИЯ_V4.15.txt')) {
+        $RuntimeDocPath = Join-Path $RuntimeAppDir $RuntimeDoc
+        if (Test-Path -LiteralPath $RuntimeDocPath) { Copy-Item -LiteralPath $RuntimeDocPath -Destination $BundleRuntimeDir }
+    }
+    Get-ChildItem -LiteralPath $TrustTunnelRoot -Force | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $BundleRuntimeDir -Recurse -Force }
+    Copy-Item -LiteralPath $VersionFile -Destination (Join-Path $BundleRuntimeDir 'VERSION') -Force
 
     $QuickStart = Join-Path $DocsDir 'QUICK_START_BUNDLE_RU.txt'
-    if (Test-Path -LiteralPath $QuickStart -PathType Leaf) {
-        Copy-Item -LiteralPath $QuickStart -Destination (Join-Path $BundleRuntimeDir 'README_QUICK_START_RU.txt') -Force
-    }
+    $QuickStartName = 'ИНСТРУКЦИЯ БЫСТРОГО СТАРТА.txt'
+    Assert-File $QuickStart 'Quick start guide is missing.'
+    Copy-Item -LiteralPath $QuickStart -Destination (Join-Path $BundleRoot $QuickStartName) -Force
+    Remove-Item -LiteralPath (Join-Path $BundleRuntimeDir 'README_QUICK_START_RU.txt') -Force -ErrorAction SilentlyContinue
 
     Set-Content -LiteralPath (Join-Path $BundleRuntimeDir 'BUILD_INFO.txt') -Value @"
 LW TrustTunnel Client version: $LWTTVersion
@@ -102,13 +129,13 @@ Built at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 Builder: tools\build_bundle.ps1
 "@ -Encoding UTF8
 
-    $SensitivePaths = @('lwtt_app\profiles','lwtt_app\log','lwtt_app\profiles\certificates','lwtt_app\profiles\backups')
+    $SensitivePaths = @('lwtt_app\settings','lwtt_app\profiles','lwtt_app\log','lwtt_app\profiles\certificates','lwtt_app\profiles\backups')
     foreach ($Rel in $SensitivePaths) {
         $Path = Join-Path $BundleRoot $Rel
         if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force }
     }
     Get-ChildItem -LiteralPath $BundleRoot -Recurse -Force -File | Where-Object {
-        $_.Name -ieq 'lwtt_client.toml' -or $_.Name -ieq 'trusttunnel_client.likeweb.toml' -or $_.Name -like '*.pem' -or $_.Name -like '*diagnostic*.txt' -or $_.Name -like '*.pid' -or $_.Name -like '*.log'
+        $_.Name -ieq 'lwtt_client.toml' -or $_.Name -ieq 'trusttunnel_client.likeweb.toml' -or $_.Name -like '*.pem' -or $_.Name -like '*diagnostic*.txt' -or $_.Name -like '*.pid' -or $_.Name -like '*.log' -or $_.Name -like '*.tmp' -or $_.Name -like '*.bak'
     } | Remove-Item -Force
 
     Assert-File (Join-Path $BundleRoot 'lwtt_tray_start.bat') 'Bundle validation failed: lwtt_tray_start.bat is missing.'
@@ -116,8 +143,12 @@ Builder: tools\build_bundle.ps1
     Assert-File (Join-Path $BundleRuntimeDir 'wintun.dll') 'Bundle validation failed: wintun.dll is missing in lwtt_app.'
     Assert-File (Join-Path $BundleRuntimeDir 'lwtt_tray.ps1') 'Bundle validation failed: lwtt_tray.ps1 is missing in lwtt_app.'
 
+    foreach ($Required in (Get-Content -LiteralPath (Join-Path $ScriptRoot 'runtime-files.txt'))) {
+        if ($Required.Trim()) { Assert-File (Join-Path $BundleRuntimeDir $Required.Trim()) ('Missing runtime file: ' + $Required) }
+    }
+
     foreach ($Item in (Get-ChildItem -LiteralPath $BundleRoot -Force)) {
-        if ($Item.Name -ne 'lwtt_tray_start.bat' -and $Item.Name -ne 'lwtt_app') { throw "Unexpected item in ZIP root: $($Item.Name)" }
+        if ($Item.Name -ne 'lwtt_tray_start.bat' -and $Item.Name -ne 'lwtt_app' -and $Item.Name -ne $QuickStartName) { throw "Unexpected item in ZIP root: $($Item.Name)" }
     }
 
     $SafeTTVersion = $TrustTunnelTag.TrimStart('v')

@@ -26,3 +26,11 @@ Desktop.ini
 
 # Local bundle build cache
 .bundle_work/
+
+# Shared routing preferences and isolated tests
+settings/
+tests/.runtime-*/
+
+# Interrupted atomic writes
+*.bak
+__pycache__/
