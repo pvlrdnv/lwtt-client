@@ -53,7 +53,7 @@ lwtt_app\
 - `docs/TROUBLESHOOTING_RU.md` – troubleshooting guide.
 - `docs/SECURITY_RU.md` – privacy and security notes.
 - `docs/BUNDLE_WSL_RU.md` – instructions for building the ready-to-run bundle in VS Code WSL.
-- `dist/LWTT_Client_Manager_v4_19_public.zip` – public package with the LWTT wrapper only, without user profiles.
+- `dist/LWTT_Client_Manager_v4_20_public.zip` – public package with the LWTT wrapper only, without user profiles.
 - `tools/build_bundle_wsl.sh` – WSL builder for the ready-to-run Windows x86_64 archive.
 
 ## License

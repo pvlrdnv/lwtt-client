@@ -1,11 +1,11 @@
-# Сборка LW TrustTunnel Client 4.19
+# Сборка LW TrustTunnel Client 4.20
 
-Основной архив: `dist/LWTT_Client_Bundle_windows_x86_64.zip`. Версионный архив: `dist/LWTT_Client_Bundle_v4.19_trusttunnel_v1.0.49_windows_x86_64.zip`.
+Основной архив: `dist/LWTT_Client_Bundle_windows_x86_64.zip`. Версионный архив: `dist/LWTT_Client_Bundle_v4.20_trusttunnel_v1.0.49_windows_x86_64.zip`.
 
 Для установки распакуйте архив и запустите `lwtt_tray_start.bat`. В корне также находится краткая инструкция; технические файлы размещены в `lwtt_app`.
 
 Версия оболочки берётся из `VERSION`, версия движка и проверяемые SHA256 из `tools/trusttunnel-release.json`. Оба сборщика используют `tools/runtime-files.txt` для проверки обязательных файлов.
 
-Архив только с оболочкой: `dist/LWTT_Client_Manager_v4_19_public.zip`. Он требует отдельно добавить `trusttunnel_client.exe` и `wintun.dll` в `lwtt_app`.
+Архив только с оболочкой: `dist/LWTT_Client_Manager_v4_20_public.zip`. Он требует отдельно добавить `trusttunnel_client.exe` и `wintun.dll` в `lwtt_app`.
 
 Публичные архивы исключают профили, сертификаты пользователей, настройки обхода, активную конфигурацию и журналы. Перед выпуском обязательны проверки `tests/run.ps1`, `tests/interface.ps1`, целостности ZIP, контрольных сумм и совпадения скриптов с исходниками. Для проверки реального подключения, маршрутов, UAC и DPI нужен отдельный запуск на Windows; изолированные тесты не заменяют его.

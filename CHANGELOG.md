@@ -1,5 +1,10 @@
 # Changelog
 
+## 4.20
+
+- Highlighted the bypass enable checkbox in a colored panel with a clear state hint.
+- Styled Save and apply as the blue primary action on the right; moved Close to the left.
+
 ## 4.19
 
 - Fixed equal-length credential redaction and kept rollback independent of diagnostic reads.

@@ -50,8 +50,8 @@ chmod +x build_bundle_wsl.sh tools/build_bundle_wsl.sh
 ```text
 LWTT_Client_Bundle_windows_x86_64.zip
 LWTT_Client_Bundle_windows_x86_64.zip.sha256
-LWTT_Client_Bundle_v4.19_trusttunnel_v..._windows_x86_64.zip
-LWTT_Client_Bundle_v4.19_trusttunnel_v..._windows_x86_64.zip.sha256
+LWTT_Client_Bundle_v4.20_trusttunnel_v..._windows_x86_64.zip
+LWTT_Client_Bundle_v4.20_trusttunnel_v..._windows_x86_64.zip.sha256
 ```
 
 Главная стабильная ссылка для README:
@@ -84,7 +84,7 @@ git add README.md tools/build_bundle_wsl.sh build_bundle_wsl.sh docs/BUNDLE_WSL_
   dist/LWTT_Client_Bundle_windows_x86_64.zip \
   dist/LWTT_Client_Bundle_windows_x86_64.zip.sha256
 
-git commit -m "Build LWTT bundle v4.19 for windows_x86_64"
+git commit -m "Build LWTT bundle v4.20 for windows_x86_64"
 git push origin main
 ```
 
